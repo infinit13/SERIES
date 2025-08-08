@@ -12,8 +12,8 @@ const port = 8202; // 서버는 이 포트 하나만 사용한다
 const timeframeToTableMap = {
   '1m': 'candles',
   '5m': 'candles5m',
-  // 여기에 '15m', '1h' 등 다른 테이블도 추가하면 바로 확장 가능
-  // '15m': 'candles15m',
+  '15m': 'candles15m'
+  // 여기에 '1h' 등 다른 테이블도 추가하면 바로 확장 가능
   // '1h': 'candles1h',
 };
 
@@ -80,7 +80,6 @@ app.get('/api/klines', async (req, res, next) => {
 
     logger.info(`  요청 파라미터: symbol=${symbol}, timeframe=${timeframe}, limit=${req.query.limit}, startTime=${req.query.startTime}, endTime=${req.query.endTime}, beforeTimestamp=${beforeTimestamp}`);
     logger.info(`  조회 대상 테이블: ${targetTable} (timeframe: ${timeframe}에 따라 결정됨)`);
-
     // --- 데이터 조회 로직 (기존 로직과 거의 동일) ---
     if (!isNaN(beforeTimestamp) && !isNaN(requestedLimit) && requestedLimit > 0) {
       const limit = Math.min(requestedLimit, maxAllowedLimit);

@@ -208,8 +208,8 @@ if __name__ == '__main__':
     LOOKAROUND = 5
     TOLERANCE = 0.001
     SYMBOL = "BTCUSDT"
-    TIMEFRAME = "1m"
-    OUTPUT_FILENAME = "1m_analysis_results_5years_robust.parquet"
+    TIMEFRAME = "15m"
+    OUTPUT_FILENAME = "15m_analysis_results_5years_robust.parquet"
     CPU_CORES = 8
     # -------------------------
 

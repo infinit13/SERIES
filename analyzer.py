@@ -1,4 +1,4 @@
-# professional_analyzer_dashboard.py (Screenshot by Index Function Added)
+# professional_analyzer_dashboard.py (Timeframe-aware Screenshot Frame Added)
 
 import dash
 from dash import dcc, html
@@ -13,12 +13,13 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# ## 섹션 1: 분석/시각화 함수들 (기존과 동일)
+# ## 섹션 1: 분석/시각화 함수들 (수정됨)
 # ==============================================================================
 def fetch_klines(symbol: str, timeframe: str, start_ts: int, end_ts: int) -> pd.DataFrame:
+    """지정한 기간의 캔들 데이터를 서버에서 가져옵니다."""
     url = "http://localhost:8202/api/klines"
     params = {"symbol": symbol.upper(), "interval": timeframe, "startTime": start_ts, "endTime": end_ts}
-    print(f"데이터 서버에서 스크린샷용 데이터를 요청합니다 ({start_ts} ~ {end_ts})...")
+    print(f"데이터 서버에서 스크린샷용 데이터를 요청합니다 (Timeframe: {timeframe}, Range: {start_ts} ~ {end_ts})...")
     try:
         response = requests.get(url, params=params, timeout=60)
         response.raise_for_status()
@@ -34,6 +35,7 @@ def fetch_klines(symbol: str, timeframe: str, start_ts: int, end_ts: int) -> pd.
         return pd.DataFrame()
 
 def find_pivots_optimized(df: pd.DataFrame, lookaround: int):
+    """최적화된 피봇 찾기 함수 (기존과 동일)"""
     if df.empty or len(df) < (2 * lookaround + 1): return []
     highs, lows = df['high'].values, df['low'].values
     timestamps = df.index.astype(np.int64) // 10**6
@@ -62,6 +64,7 @@ def find_pivots_optimized(df: pd.DataFrame, lookaround: int):
     return final_pivots
 
 def analyze_channel(pivots, all_pivots, df, tolerance, is_upward):
+    """채널 분석 함수 (기존과 동일)"""
     p_type, t_type = ('T', 'P') if is_upward else ('P', 'T')
     primary_pivots = sorted([p for p in pivots if p['type'] == p_type], key=lambda x: x['time'])
     if len(primary_pivots) < 2 or (is_upward and primary_pivots[1]['price'] < primary_pivots[0]['price']) or (not is_upward and primary_pivots[1]['price'] > primary_pivots[0]['price']): return None
@@ -87,6 +90,7 @@ def analyze_channel(pivots, all_pivots, df, tolerance, is_upward):
     return {'x0': p1['time'], 'y0': p1['price'], 'x1': extreme_pivot['time'], 'y1': extreme_pivot['price']}
 
 def find_main_series_optimized(all_pivots, df, tolerance):
+    """메인 시리즈 찾기 함수 (기존과 동일)"""
     main_series_shapes, pivot_index = [], 0
     while pivot_index < len(all_pivots) - 2:
         current_pivot, next_pivot = all_pivots[pivot_index], all_pivots[pivot_index + 1]
@@ -105,6 +109,7 @@ def find_main_series_optimized(all_pivots, df, tolerance):
     return sorted(main_series_shapes, key=lambda s: s['shape']['x0'])
 
 def build_hybrid_series_sequence(df, all_pivots, tolerance):
+    """하이브리드 시퀀스 생성 함수 (기존과 동일)"""
     main_series = find_main_series_optimized(all_pivots, df, tolerance)
     if not main_series:
         return [{"type": f"SUB_{'UP' if p2['price'] > p1['price'] else 'DOWN'}", "shape": {"x0": p1['time'], "y0": p1['price'], "x1": p2['time'], "y1": p2['price']}} for p1, p2 in zip(all_pivots, all_pivots[1:])]
@@ -120,9 +125,15 @@ def build_hybrid_series_sequence(df, all_pivots, tolerance):
     main_coords = {(s['shape']['x0'], s['shape']['x1']) for s in main_series}
     return [s for s in consolidated_series if not (s['type'].startswith('SUB') and (s['shape']['x0'], s['shape']['x1']) in main_coords)]
 
-def visualize_single_series_and_save(df, all_series, target_series, output_filename, all_pivots):
+def visualize_single_series_and_save(df, all_series, target_series, output_filename, all_pivots, timeframe="5m"):
+    """❗️❗️❗️ 차트 시각화 및 저장 (타임프레임에 따른 프레임 조절 기능 추가) ❗️❗️❗️"""
     start_ms, end_ms = target_series['shape']['x0'], target_series['shape']['x1']
-    padding = (end_ms - start_ms) * 0.5
+
+    # 타임프레임별로 차트의 좌우 여백(Padding)을 다르게 설정
+    padding_map = {'1m': 1.0, '5m': 0.5, '15m': 0.3}
+    padding_multiplier = padding_map.get(timeframe, 0.5) # 기본값 0.5
+    padding = (end_ms - start_ms) * padding_multiplier
+
     plot_df = df[(df.index.astype(np.int64)//10**6 >= start_ms - padding) & (df.index.astype(np.int64)//10**6 <= end_ms + padding)]
     if plot_df.empty:
         print(f"경고: 해당 시리즈 기간에 대한 데이터가 없어 스크린샷을 건너뜁니다: {output_filename}")
@@ -166,13 +177,14 @@ def visualize_single_series_and_save(df, all_series, target_series, output_filen
     
     try:
         mpf.plot(plot_df, type='candle', style=style,
-                 title=f"Series Screenshot: {pd.to_datetime(start_ms, unit='ms').strftime('%Y-%m-%d %H:%M')}",
+                 title=f"Series [{timeframe.upper()}] - {pd.to_datetime(start_ms, unit='ms').strftime('%Y-%m-%d %H:%M')}",
                  alines=dict(alines=lines, colors=colors, linestyle=styles, linewidths=widths),
                  addplot=addplots if addplots else None,
                  savefig=dict(fname=output_filename, dpi=150))
         print(f"성공! 단일 시리즈 차트가 '{output_filename}'에 저장되었습니다.")
     except Exception as e:
         print(f"단일 시리즈 차트 시각화 중 오류 발생: {e}")
+
 
 # ==============================================================================
 # ## 섹션 2: Dash 앱 레이아웃 및 컴포넌트 (수정됨)
@@ -186,26 +198,36 @@ app.layout = html.Div(style={'backgroundColor': '#1E1E1E', 'color': '#E0E0E0', '
     
     # --- 컨트롤 패널 ---
     html.Div([
+        # ❗️❗️❗️ 파일 경로 입력 대신 드롭다운으로 변경 ❗️❗️❗️
         html.Div([
             html.H4("1. 데이터 로드", style={'marginTop': '0'}),
-            dcc.Input(id='filepath-input', type='text', placeholder='분석 결과 파일 경로', value='analysis_results_5years_robust.parquet', style={'width': '300px'}),
-            html.Button('데이터 불러오기', id='load-data-button', n_clicks=0, style={'padding': '8px 15px', 'marginLeft': '20px'}),
+            dcc.Dropdown(
+                id='filepath-dropdown',
+                options=[
+                    {'label': '1분봉 분석 결과 (1m_analysis_results_5years_robust.parquet)', 'value': '1m_analysis_results_5years_robust.parquet'},
+                    {'label': '5분봉 분석 결과 (analysis_results_5years_robust.parquet)', 'value': 'analysis_results_5years_robust.parquet'},
+                    {'label': '15분봉 분석 결과 (15m_analysis_results_5years_robust.parquet)', 'value': '15m_analysis_results_5years_robust.parquet'},
+                ],
+                value='analysis_results_5years_robust.parquet', # 기본 선택값
+                style={'width': '100%', 'color': '#1E1E1E'},
+                clearable=False
+            ),
+            html.Button('데이터 불러오기', id='load-data-button', n_clicks=0, style={'padding': '8px 15px', 'marginLeft': '20px', 'marginTop': '10px'}),
         ], style={'textAlign': 'center', 'padding': '10px', 'backgroundColor': '#2a2a2a', 'borderRadius': '5px', 'marginBottom': '10px'}),
         
         html.Div([
             html.H4("2. 필터 조건 설정", style={'marginTop': '0'}),
-            dcc.Input(id='lookaround-input', type='number', value=5, style={'display': 'none'}), # 스크린샷용 파라미터
-            dcc.Input(id='tolerance-input', type='number', value=0.001, style={'display': 'none'}), # 스크린샷용 파라미터
+            dcc.Input(id='lookaround-input', type='number', value=5, style={'display': 'none'}),
+            dcc.Input(id='tolerance-input', type='number', value=0.001, style={'display': 'none'}),
             html.Div([
                 html.Div([html.Label("되돌림 점수 (최소/최대):"), dcc.Input(id='ret-score-min', type='number'), dcc.Input(id='ret-score-max', type='number')], style={'display': 'inline-block', 'padding': '5px 15px'}),
                 html.Div([html.Label("피봇 개수 (최소/최대):"), dcc.Input(id='pivot-min', type='number'), dcc.Input(id='pivot-max', type='number')], style={'display': 'inline-block', 'padding': '5px 15px'}),
                 html.Div([html.Label("절대 시각적 각도 (도):"), dcc.Input(id='slope-min', type='number'), dcc.Input(id='slope-max', type='number')], style={'display': 'inline-block', 'padding': '5px 15px'}),
-                html.Div([html.Label("방향:"), dcc.Dropdown(id='direction-dropdown', options=[{'label': '전체', 'value': 'all'}, {'label': '상승(UP)', 'value': 'up'}, {'label': '하락(DOWN)', 'value': 'down'}], value='all', clearable=False)], style={'display': 'inline-block', 'width': '200px', 'padding': '5px 15px', 'verticalAlign': 'middle'}),
+                html.Div([html.Label("방향:"), dcc.Dropdown(id='direction-dropdown', options=[{'label': '전체', 'value': 'all'}, {'label': '상승(UP)', 'value': 'up'}, {'label': '하락(DOWN)', 'value': 'down'}], value='all', clearable=False, style={'color': '#1E1E1E'})], style={'display': 'inline-block', 'width': '200px', 'padding': '5px 15px', 'verticalAlign': 'middle'}),
             ], style={'textAlign': 'center'}),
             html.Button('필터 적용 및 그래프 갱신', id='filter-button', n_clicks=0, style={'padding': '8px 15px', 'marginTop': '10px'}),
         ], style={'textAlign': 'center', 'padding': '10px', 'backgroundColor': '#2a2a2a', 'borderRadius': '5px', 'marginBottom': '10px'}),
         
-        # ❗️❗️❗️ 새로 추가된 섹션 ❗️❗️❗️
         html.Div([
             html.H4("3. 수동 스크린샷 생성 (인덱스)", style={'marginTop': '0'}),
             dcc.Input(id='index-input', type='number', placeholder='분석할 원본 인덱스 번호 입력...', style={'width': '250px'}),
@@ -225,18 +247,26 @@ app.layout = html.Div(style={'backgroundColor': '#1E1E1E', 'color': '#E0E0E0', '
 @app.callback(
     Output('analysis-data-store', 'data'),
     Input('load-data-button', 'n_clicks'),
-    State('filepath-input', 'value'),
+    State('filepath-dropdown', 'value'), # ❗️ State가 filepath-dropdown을 바라보도록 수정
     prevent_initial_call=True
 )
 def load_analysis_data(n_clicks, filepath):
+    """분석 파일을 로드하고 타임프레임 정보를 함께 저장합니다."""
     if not filepath: return None
     try:
         df = pd.read_parquet(filepath)
-        # 컬럼 이름이 올바르다고 가정
-        # 올바른 컬럼: ['start_ts', 'end_ts', 'retracement_score', 'pivot_count', 'abs_angle_deg', 'direction']
+        
+        # 파일 이름에서 타임프레임 추정
+        timeframe = "5m" # 기본값
+        if '1m_analysis' in filepath:
+            timeframe = '1m'
+        elif '15m_analysis' in filepath:
+            timeframe = '15m'
+        
         vectors_with_indices = list(enumerate(df.values.tolist()))
-        print(f"'{filepath}'에서 {len(vectors_with_indices)}개의 데이터를 성공적으로 불러왔습니다.")
-        return {'vectors': vectors_with_indices}
+        print(f"'{filepath}' ({timeframe})에서 {len(vectors_with_indices)}개의 데이터를 성공적으로 불러왔습니다.")
+        # ❗️ 데이터와 함께 타임프레임도 저장
+        return {'vectors': vectors_with_indices, 'timeframe': timeframe}
     except Exception as e:
         print(f"파일 로드 오류: {e}")
         return None
@@ -244,20 +274,18 @@ def load_analysis_data(n_clicks, filepath):
 @app.callback(
     Output('vector-3d-chart', 'figure'),
     Output('click-output', 'children'),
-    # 입력 트리거 확장
     Input('filter-button', 'n_clicks'),
     Input('vector-3d-chart', 'clickData'),
-    Input('screenshot-by-index-button', 'n_clicks'), # ❗️새로운 버튼 입력
-    # 상태 값
+    Input('screenshot-by-index-button', 'n_clicks'),
     State('analysis-data-store', 'data'),
     State('ret-score-min', 'value'), State('ret-score-max', 'value'),
     State('pivot-min', 'value'), State('pivot-max', 'value'),
     State('slope-min', 'value'), State('slope-max', 'value'),
     State('direction-dropdown', 'value'),
-    State('index-input', 'value'), # ❗️새로운 인덱스 입력값
+    State('index-input', 'value'),
     State('lookaround-input', 'value'),
     State('tolerance-input', 'value'),
-    prevent_initial_call=True # 앱 시작 시 자동 실행 방지
+    prevent_initial_call=True
 )
 def update_graph_and_handle_actions(
     filter_clicks, clickData, screenshot_by_index_clicks,
@@ -266,16 +294,18 @@ def update_graph_and_handle_actions(
     target_index,
     lookaround, tolerance
 ):
+    """❗️❗️❗️ 그래프 업데이트 및 스크린샷 생성 (타임프레임 인지 기능 추가) ❗️❗️❗️"""
     if not analysis_data or 'vectors' not in analysis_data:
         return go.Figure().update_layout(title_text="'데이터 불러오기' 버튼을 눌러 분석 결과를 로드하세요.", template='plotly_dark'), "대기 중..."
 
     ctx = callback_context
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else 'No trigger'
     
+    # ❗️ 저장소에서 타임프레임 정보 가져오기
+    timeframe = analysis_data.get('timeframe', '5m')
     vectors_with_indices = analysis_data['vectors']
     message = ""
 
-    # ❗️❗️❗️ 스크린샷 생성 로직 (클릭 또는 인덱스 입력) ❗️❗️❗️
     screenshot_request_index = None
     if triggered_id == 'vector-3d-chart' and clickData:
         screenshot_request_index = clickData['points'][0]['customdata']
@@ -288,18 +318,26 @@ def update_graph_and_handle_actions(
         if original_vector_item:
             original_vector = original_vector_item[1]
             start_ts, end_ts = int(original_vector[0]), int(original_vector[1])
-            padding = (end_ts - start_ts) * 1.0
             
-            print(f"인덱스 {screenshot_request_index}의 상세 분석을 시작합니다...")
-            df_local = fetch_klines("BTCUSDT", "5m", int(start_ts - padding), int(end_ts + padding))
+            # ❗️ 타임프레임별로 데이터 로드 시의 패딩을 다르게 설정
+            padding_map_fetch = {'1m': 1.5, '5m': 1.0, '15m': 0.8}
+            padding_multiplier = padding_map_fetch.get(timeframe, 1.0)
+            padding = (end_ts - start_ts) * padding_multiplier
+            
+            print(f"인덱스 {screenshot_request_index}의 상세 분석을 시작합니다 (타임프레임: {timeframe})...")
+            # ❗️ fetch_klines 호출 시 타임프레임 변수 사용
+            df_local = fetch_klines("BTCUSDT", timeframe, int(start_ts - padding), int(end_ts + padding))
             
             if not df_local.empty:
                 local_pivots = find_pivots_optimized(df_local, lookaround)
                 local_series_sequence = build_hybrid_series_sequence(df_local, local_pivots, tolerance)
                 
                 target_series = min(local_series_sequence, key=lambda s: abs(s['shape']['x0'] - start_ts) + abs(s['shape']['x1'] - end_ts))
-                output_filename = f"screenshot_{datetime.fromtimestamp(start_ts/1000).strftime('%Y%m%d_%H%M%S')}_series_{screenshot_request_index}.png"
-                visualize_single_series_and_save(df_local, local_series_sequence, target_series, output_filename, local_pivots)
+                # ❗️ 파일 이름에 타임프레임 추가
+                output_filename = f"screenshot_{timeframe}_{datetime.fromtimestamp(start_ts/1000).strftime('%Y%m%d_%H%M%S')}_series_{screenshot_request_index}.png"
+                
+                # ❗️ 시각화 함수에 타임프레임 전달
+                visualize_single_series_and_save(df_local, local_series_sequence, target_series, output_filename, local_pivots, timeframe)
                 message = f"✅ 스크린샷 저장 완료: {output_filename}"
             else:
                 message = f"❌ 스크린샷 생성 실패 (인덱스 {screenshot_request_index}): 해당 구간의 데이터를 가져올 수 없습니다."
@@ -319,7 +357,7 @@ def update_graph_and_handle_actions(
     ]
 
     graph_message = f"필터링된 데이터: {len(filtered_vectors_with_indices)}개"
-    final_message = message if message else graph_message # 스크린샷 메시지가 있으면 그걸 보여주고, 없으면 필터 메시지 표시
+    final_message = message if message else graph_message
 
     # --- 3D 플롯 생성 로직 ---
     if not filtered_vectors_with_indices:
@@ -364,8 +402,8 @@ def update_graph_and_handle_actions(
 if __name__ == '__main__':
     print("\n### 사용 안내 ###")
     print("1. 데이터 서버(server_5min.cjs)를 실행하세요.")
-    print("2. 분석 결과(.parquet) 파일이 있는지 확인하세요.")
+    print("2. 분석 결과(.parquet) 파일들이 스크립트와 같은 폴더에 있는지 확인하세요.")
     print("3. 이 대시보드 스크립트를 실행하고 웹 브라우저에서 http://127.0.0.1:8050 주소로 접속하세요.")
-    print("4. '데이터 불러오기' -> (선택)필터 적용 -> 점 클릭 또는 인덱스 입력으로 스크린샷 생성.")
+    print("4. 드롭다운에서 분석할 타임프레임 선택 -> '데이터 불러오기' -> (선택)필터 적용 -> 점 클릭 또는 인덱스 입력으로 스크린샷 생성.")
    
     app.run(debug=True, port=8050)
