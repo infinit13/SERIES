@@ -233,12 +233,15 @@ function initializePlotly(initialData = []) {
     };
     const config = { responsive: true, displayModeBar: false, scrollZoom: false };
 
-    Plotly.newPlot(chartContainer, [traceCandle], layout, config).then(() => {
+    return Plotly.newPlot(chartContainer, [traceCandle], layout, config).then(() => {
         chartInitialized = true;
-        if (!isInTimeTravelMode) { updateChartRange(klinesData); }
         setupChartEventListeners();
         handleDrawingToolToggle(isBoxDrawingEnabled ? 'box' : 'none');
-    }).catch(err => console.error("Error initializing Plotly:", err));
+    }).catch(err => {
+        console.error("Error initializing Plotly:", err);
+        chartInitialized = false;
+        throw err;
+    });
 }
 
 function updateChartRange(data, forceManualX = false, forceManualY = false) {
@@ -366,7 +369,10 @@ async function fetchAndDisplayTimeTravelData(selectedEndTime) {
             klinesData = data.map(k => [k[0], k[1], k[2], k[3], k[4], parseFloat(k[5] || 0)]).sort((a, b) => a[0] - b[0]);
             drawnBoxes = [];
             if (chartContainer._fullLayout) Plotly.purge(chartContainer);
-            initializePlotly(klinesData);
+            
+            await initializePlotly(klinesData);
+            updateChartRange(klinesData, true, false);
+
             timeTravelPickerArea.style.display = 'none'; goLiveButton.style.display = 'inline-block'; calendarIconButton.classList.add('active');
         } else {
             chartContainer.innerHTML = `<p style="color:red; padding: 20px;">데이터 로딩 실패.</p>`;
@@ -434,7 +440,10 @@ async function initializeCharts(symbol, timeframe) {
         chartContainer.innerHTML = `<p style="color:red; padding: 20px;">데이터 로딩 실패.</p>`;
         return;
     }
-    initializePlotly(klinesData);
+    
+    await initializePlotly(klinesData);
+    updateChartRange(klinesData);
+
     updateTopBar();
     connectWebSocket(symbol, timeframe);
     updateActiveTimeframeButton(timeframe);

@@ -1,4 +1,4 @@
-# professional_analyzer_dashboard.py (UMAP + DBSCAN Integrated)
+# professional_analyzer_dashboard.py (UMAP + DBSCAN Integrated, v2)
 
 import dash
 from dash import dcc, html
@@ -245,10 +245,11 @@ app.layout = html.Div(style={'backgroundColor': '#1E1E1E', 'color': '#E0E0E0', '
                 dcc.Dropdown(
                     id='color-selector',
                     options=[
+                        {'label': '채색: 세력 점수', 'value': 'force_score'},
                         {'label': '채색: 방향 (UP/DOWN)', 'value': 'direction'},
                         {'label': '채색: DBSCAN 클러스터', 'value': 'dbscan'}
                     ],
-                    value='direction',
+                    value='force_score', # ❗️기본값을 '세력 점수'로 변경
                     clearable=False,
                     style={'width': '250px', 'display': 'inline-block', 'verticalAlign': 'middle'}
                 ),
@@ -282,9 +283,7 @@ app.layout = html.Div(style={'backgroundColor': '#1E1E1E', 'color': '#E0E0E0', '
 def load_analysis_data(n_clicks, filepath):
     if not filepath: return None
     try:
-        # 올바른 컬럼 이름으로 데이터프레임 로드
         df = pd.read_parquet(filepath)
-        # 필요한 컬럼만 선택하고 순서 고정
         columns = ['start_ts', 'end_ts', 'retracement_score', 'pivot_count', 'abs_angle_deg', 'direction']
         df = df[columns]
         vectors_with_indices = list(enumerate(df.values.tolist()))
@@ -348,7 +347,6 @@ def universal_callback(
         point = clickData['points'][0]
         original_index = point['customdata']
         original_vector = next((item[1] for item in vectors_with_indices if item[0] == original_index), None)
-
         if original_vector:
             start_ts, end_ts = int(original_vector[0]), int(original_vector[1])
             padding = (end_ts - start_ts) * 1.0
@@ -371,69 +369,80 @@ def universal_callback(
     original_indices, filtered_vectors = zip(*filtered_vectors_with_indices)
     df_filtered = pd.DataFrame([list(v) for v in filtered_vectors], columns=['start_ts', 'end_ts', 'retracement_score', 'pivot_count', 'abs_angle_deg', 'direction'])
     
-    # 분석에 사용할 특징 선택
-    features = df_filtered[['retracement_score', 'abs_angle_deg', 'pivot_count']].values
+    # ❗️세력 점수 계산
+    df_filtered['force_score'] = df_filtered['retracement_score'] * df_filtered['abs_angle_deg']
     
-    # 데이터 스케일링 (필수!)
+    features = df_filtered[['retracement_score', 'abs_angle_deg', 'pivot_count']].values
     scaler = StandardScaler()
     scaled_features = scaler.fit_transform(features)
     
-    # 기본 색상 및 호버 텍스트 설정
-    colors = ['lightgreen' if v[5] == 1.0 else 'lightcoral' for v in filtered_vectors]
-    hover_texts = [f"인덱스: {idx}<br>점수: {v[2]:.2f}<br>각도: {v[4]:.2f}°<br>피봇: {v[3]}<br>방향: {'UP' if v[5] == 1.0 else 'DOWN'}" for idx, v in zip(original_indices, filtered_vectors)]
-    
+    # ❗️업데이트된 호버 텍스트 생성
+    hover_texts = []
+    for index, row in df_filtered.iterrows():
+        original_idx = original_indices[index]
+        direction_str = 'UP' if row['direction'] == 1.0 else 'DOWN'
+        hover_texts.append(
+            f"인덱스: {original_idx}<br>"
+            f"되돌림 점수: {row['retracement_score']:.2f}<br>"
+            f"절대 각도: {row['abs_angle_deg']:.2f}°<br>"
+            f"<b>세력 점수: {row['force_score']:.2f}</b><br>"
+            f"피봇: {row['pivot_count']:.0f}<br>"
+            f"방향: {direction_str}"
+        )
+
     fig = go.Figure()
     fig.update_layout(template='plotly_dark', margin=dict(l=10, r=20, b=10, t=60))
     
+    base_marker_props = {'opacity': 0.8}
+    
     # --- 채색 기준 분기 ---
-    if color_mode == 'dbscan':
-        # DBSCAN을 위한 데이터 준비 (뷰 모드에 따라 다름)
+    if color_mode == 'force_score':
+        base_marker_props.update({
+            'color': df_filtered['force_score'],
+            'colorscale': 'Plasma',
+            'colorbar': {'title': '세력 점수'},
+            'showscale': True
+        })
+    elif color_mode == 'direction':
+        base_marker_props['color'] = ['lightgreen' if d == 1.0 else 'lightcoral' for d in df_filtered['direction']]
+    elif color_mode == 'dbscan':
         data_for_dbscan = scaled_features if view_mode == '3d' else umap.UMAP(n_neighbors=umap_neighbors, min_dist=umap_min_dist, random_state=42).fit_transform(scaled_features)
-        
         dbscan = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples)
         labels = dbscan.fit_predict(data_for_dbscan)
-        
         n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
         n_noise = list(labels).count(-1)
         message += f" | DBSCAN 결과: {n_clusters}개 클러스터, {n_noise}개 노이즈"
         
-        # 클러스터별 색상 지정
         unique_labels = sorted(list(set(labels)))
         color_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
         label_colors = {label: color_palette[i % len(color_palette)] for i, label in enumerate(unique_labels) if label != -1}
-        label_colors[-1] = '#444444' # 노이즈 색상
+        label_colors[-1] = '#444444'
         colors = [label_colors[l] for l in labels]
-        
-        # 호버 텍스트에 클러스터 정보 추가
+        base_marker_props['color'] = colors
         hover_texts = [f"{ht}<br>클러스터: {l}" for ht, l in zip(hover_texts, labels)]
 
     # --- 뷰 모드 분기 ---
     if view_mode == '3d':
+        final_marker_props = base_marker_props.copy()
+        final_marker_props.update({'size': 5, 'symbol': 'square'})
         fig.add_trace(go.Scatter3d(
             x=df_filtered['retracement_score'], y=df_filtered['abs_angle_deg'], z=df_filtered['pivot_count'],
             mode='markers', customdata=original_indices,
-            marker=dict(size=5, symbol='square', color=colors, opacity=0.8),
-            text=hover_texts, hoverinfo='text'
+            marker=final_marker_props, text=hover_texts, hoverinfo='text'
         ))
-        fig.update_layout(
-            title_text=f'3D 벡터 공간 | {message}',
-            scene=dict(xaxis_title='되돌림 점수', yaxis_title='절대 각도 (도)', zaxis_title='피봇 개수')
-        )
+        fig.update_layout(title_text=f'3D 벡터 공간 | {message}', scene=dict(xaxis_title='되돌림 점수', yaxis_title='절대 각도 (도)', zaxis_title='피봇 개수'))
     
     elif view_mode == 'umap':
         reducer = umap.UMAP(n_neighbors=umap_neighbors, min_dist=umap_min_dist, n_components=2, random_state=42)
         embedding = reducer.fit_transform(scaled_features)
-        
+        final_marker_props = base_marker_props.copy()
+        final_marker_props.update({'size': 7})
         fig.add_trace(go.Scatter(
             x=embedding[:, 0], y=embedding[:, 1],
             mode='markers', customdata=original_indices,
-            marker=dict(size=7, color=colors, opacity=0.8),
-            text=hover_texts, hoverinfo='text'
+            marker=final_marker_props, text=hover_texts, hoverinfo='text'
         ))
-        fig.update_layout(
-            title_text=f'2D UMAP 사영 | {message}',
-            xaxis_title='UMAP 1', yaxis_title='UMAP 2'
-        )
+        fig.update_layout(title_text=f'2D UMAP 사영 | {message}', xaxis_title='UMAP 1', yaxis_title='UMAP 2')
 
     return fig, message
 
