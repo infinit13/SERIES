@@ -54,7 +54,7 @@ app.get('/api/klines', async (req, res, next) => {
   try {
     const symbol = req.query.symbol || 'BTCUSDT';
     // [수정] 프론트에서 요청한 timeframe을 그대로 사용. 기본값은 '1m'
-   const timeframe = req.query.interval || '1m'; 
+    const timeframe = req.query.timeframe || '1m';
 
     // [핵심] 요청된 timeframe에 맞는 테이블 이름을 동적으로 선택
     const targetTable = timeframeToTableMap[timeframe];

@@ -1,4 +1,4 @@
-# professional_analyzer_dashboard_v4.4.py (Scaling Hotfix)
+# professional_analyzer_dashboard_v4.5.py (Dimension Hotfix)
 
 import dash
 from dash import dcc, html
@@ -91,8 +91,6 @@ app.layout = html.Div(style={'backgroundColor': '#1E1E1E', 'color': '#E0E0E0', '
                     value='child_strength', clearable=False,
                     style={'width': '250px', 'display': 'inline-block', 'verticalAlign': 'middle', 'marginRight': '10px'}
                 ),
-                ### 수정된 부분 ###
-                # 자식 총점수 채색 시 사용할 스케일링 방법 선택 UI
                 dcc.RadioItems(
                     id='scaling-method-selector',
                     options=[
@@ -109,7 +107,6 @@ app.layout = html.Div(style={'backgroundColor': '#1E1E1E', 'color': '#E0E0E0', '
         ], style={'padding': '15px', 'backgroundColor': '#2a2a2a', 'borderRadius': '5px'}),
     ], style={'textAlign': 'center', 'padding': '10px'}),
 
-    # 메인 차트와 자식 패널 레이아웃
     dcc.Loading(id="loading-icon", children=[dcc.Graph(id='main-chart', style={'height': '60vh'})], type="default"),
     dcc.Loading(dcc.Graph(id='child-overview', style={'height': '35vh'})),
     html.Div(id='click-output', style={'textAlign': 'center', 'padding': '10px', 'fontSize': '16px', 'fontWeight': 'bold'}),
@@ -120,7 +117,6 @@ app.layout = html.Div(style={'backgroundColor': '#1E1E1E', 'color': '#E0E0E0', '
 # ==============================================================================
 
 def get_force_score(df):
-    """세력 점수를 계산하는 헬퍼 함수"""
     return df['retracement_score'] * df['abs_angle_deg'].abs()
 
 @app.callback(
@@ -133,38 +129,27 @@ def get_force_score(df):
 def load_analysis_data(n_clicks, parent_path, child_path):
     if not parent_path or not child_path: return None
     try:
-        df_parent = pd.read_parquet(parent_path)
-        df_child = pd.read_parquet(child_path)
+        df_parent, df_child = pd.read_parquet(parent_path), pd.read_parquet(child_path)
+        df_parent['force_score'], df_child['force_score'] = get_force_score(df_parent), get_force_score(df_child)
 
-        df_parent['force_score'] = get_force_score(df_parent)
-        df_child['force_score'] = get_force_score(df_child)
-
-        child_max_force = []
-        child_sum_force = []
-        for parent_row in df_parent.itertuples():
-            children_in_range = df_child[
-                (df_child['start_ts'] >= parent_row.start_ts) & 
-                (df_child['end_ts'] <= parent_row.end_ts)
-            ]
-            child_max_force.append(children_in_range['force_score'].max() if not children_in_range.empty else 0)
-            child_sum_force.append(children_in_range['force_score'].sum() if not children_in_range.empty else 0)
+        child_max_force, child_sum_force = [], []
+        for _, parent_row in df_parent.iterrows():
+            children = df_child[(df_child['start_ts'] >= parent_row['start_ts']) & (df_child['end_ts'] <= parent_row['end_ts'])]
+            child_max_force.append(children['force_score'].max() if not children.empty else 0)
+            child_sum_force.append(children['force_score'].sum() if not children.empty else 0)
         
-        df_parent['child_max_force'] = child_max_force
-        df_parent['child_sum_force'] = child_sum_force
+        df_parent['child_max_force'], df_parent['child_sum_force'] = child_max_force, child_sum_force
         
-        strong_children_mask = df_parent['child_max_force'] > 0
         y = pd.Series(-1, index=df_parent.index, dtype=int)
-        
-        if strong_children_mask.any():
-            qt = QuantileTransformer(n_quantiles=5, output_distribution='uniform', random_state=42)
-            scores_to_transform = df_parent.loc[strong_children_mask, ['child_max_force']]
-            if len(scores_to_transform) > 0 and scores_to_transform.nunique().iloc[0] < 5:
-                 unique_count = scores_to_transform.nunique().iloc[0]
-                 qt.n_quantiles = unique_count if unique_count > 0 else 1
-            if qt.n_quantiles > 1:
-                y[strong_children_mask] = pd.cut(qt.fit_transform(scores_to_transform).flatten(), bins=qt.n_quantiles, labels=False, include_lowest=True)
-            else:
-                 y[strong_children_mask] = 0
+        strong_mask = df_parent['child_max_force'] > 0
+        if strong_mask.any():
+            scores_to_transform = df_parent.loc[strong_mask, ['child_max_force']]
+            n_unique = scores_to_transform.nunique().iloc[0]
+            n_q = min(5, n_unique) if n_unique > 0 else 1
+            if n_q > 1:
+                qt = QuantileTransformer(n_quantiles=n_q, output_distribution='uniform', random_state=42)
+                y[strong_mask] = pd.cut(qt.fit_transform(scores_to_transform).flatten(), bins=n_q, labels=False, include_lowest=True)
+            else: y[strong_mask] = 0
         df_parent['y_child_strength_label'] = y
         return {'parent_data': df_parent.to_dict('records'), 'child_data_full': df_child.to_dict('records')}
     except Exception as e:
@@ -172,64 +157,43 @@ def load_analysis_data(n_clicks, parent_path, child_path):
         return None
 
 @app.callback(
-    Output('main-chart', 'figure'),
-    Output('child-overview', 'figure'),
-    Output('click-output', 'children'),
-    Input('run-button', 'n_clicks'),
-    Input('main-chart', 'clickData'),
+    Output('main-chart', 'figure'), Output('child-overview', 'figure'), Output('click-output', 'children'),
+    Input('run-button', 'n_clicks'), Input('main-chart', 'clickData'),
     State('analysis-data-store', 'data'),
-    State('ret-score-min', 'value'), State('ret-score-max', 'value'),
-    State('pivot-min', 'value'), State('pivot-max', 'value'),
-    State('slope-min', 'value'), State('slope-max', 'value'),
-    State('direction-dropdown', 'value'),
-    State('color-selector', 'value'),
-    State('umap-neighbors-input', 'value'),
-    State('umap-mindist-input', 'value'),
-    State('gamma-slider', 'value'),
-    ### 수정된 부분 ###
-    # 스케일링 방법 선택 값(state) 추가
-    State('scaling-method-selector', 'value'),
+    State('ret-score-min', 'value'), State('ret-score-max', 'value'), State('pivot-min', 'value'), State('pivot-max', 'value'),
+    State('slope-min', 'value'), State('slope-max', 'value'), State('direction-dropdown', 'value'),
+    State('color-selector', 'value'), State('umap-neighbors-input', 'value'), State('umap-mindist-input', 'value'),
+    State('gamma-slider', 'value'), State('scaling-method-selector', 'value'),
     prevent_initial_call=True
 )
-def universal_callback(
-    run_clicks, clickData, analysis_data,
-    rs_min, rs_max, p_min, p_max, s_min, s_max, direction,
-    color_mode, umap_neighbors, umap_min_dist, gamma,
-    scaling_method # 스케일링 방법 값
-):
+def universal_callback(run_clicks, clickData, analysis_data, rs_min, rs_max, p_min, p_max, s_min, s_max, direction,
+                       color_mode, umap_neighbors, umap_min_dist, gamma, scaling_method):
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else 'No trigger'
     df_parent_full = pd.DataFrame(analysis_data['parent_data'])
 
     if triggered_id == 'main-chart' and clickData:
         df_child_full = pd.DataFrame(analysis_data['child_data_full'])
         if 'customdata' not in clickData['points'][0]:
-            msg = "오류: 클릭 데이터에 'customdata'가 없습니다."
-            return dash.no_update, go.Figure().update_layout(template='plotly_dark', title=msg), msg
+            return dash.no_update, go.Figure().update_layout(template='plotly_dark', title="오류: customdata 없음"), "오류"
         pid = clickData['points'][0]['customdata']
         P = df_parent_full.loc[pid]
         kids = df_child_full[(df_child_full['start_ts'] >= P['start_ts']) & (df_child_full['end_ts'] <= P['end_ts'])].copy()
         if kids.empty:
-            msg = f"부모 #{pid}: 자식 없음"
-            return dash.no_update, go.Figure().update_layout(template='plotly_dark', title="자식 없음"), msg
+            return dash.no_update, go.Figure().update_layout(template='plotly_dark', title="자식 없음"), f"부모 #{pid}: 자식 없음"
 
         kids['force_score'] = get_force_score(kids)
         kids = kids.sort_values('start_ts').reset_index(drop=True)
-        kids['rank'] = kids.index + 1
-        kids['duration'] = (kids['end_ts'] - kids['start_ts']) / 1000
+        kids['rank'], kids['duration'] = kids.index + 1, (kids['end_ts'] - kids['start_ts']) / 1000
         
-        ### 수정된 부분 ###
-        # 자식 패널의 세력점수 색상을 로컬 0-1 스케일로 조정
         force_scores = kids['force_score'].values
-        min_force, max_force = force_scores.min(), force_scores.max()
-        local_scaled_color = (force_scores - min_force) / (max_force - min_force) if max_force > min_force else np.full(len(force_scores), 0.5)
+        min_f, max_f = force_scores.min(), force_scores.max()
+        local_color = (force_scores - min_f) / (max_f - min_f) if max_f > min_f else np.full(len(force_scores), 0.5)
 
         hover = "Rank: %{y}<br>Force: %{customdata[2]:.2f}<br>Dur(s): %{x:.0f}<br>start: %{customdata[0]}<br>end: %{customdata[1]}"
-        fig_child = go.Figure(go.Bar(
-            y=kids['rank'], x=kids['duration'], orientation='h',
-            marker=dict(color=local_scaled_color, colorscale='Plasma', showscale=True, colorbar=dict(title='Local Force (0-1)')),
-            customdata=np.c_[pd.to_datetime(kids['start_ts'], unit='ms').astype(str), pd.to_datetime(kids['end_ts'], unit='ms').astype(str), kids['force_score']],
-            hovertemplate=hover
-        ))
+        fig_child = go.Figure(go.Bar(y=kids['rank'], x=kids['duration'], orientation='h',
+                                     marker=dict(color=local_color, colorscale='Plasma', showscale=True, colorbar=dict(title='Local Force (0-1)')),
+                                     customdata=np.c_[pd.to_datetime(kids['start_ts'], unit='ms').astype(str), pd.to_datetime(kids['end_ts'], unit='ms').astype(str), kids['force_score']],
+                                     hovertemplate=hover))
         fig_child.update_layout(template='plotly_dark', title=f"자식 일괄 보기 · 부모 #{pid} (자식 {len(kids)}개)",
                                 xaxis_title="지속시간(초)", yaxis_title="자식 순번(시간순)", yaxis=dict(autorange="reversed"), margin=dict(l=40, r=20, b=40, t=40))
         msg = f"부모 #{pid}: 자식 {len(kids)}개, 자식 총점수: {kids['force_score'].sum():.2f}"
@@ -248,14 +212,12 @@ def universal_callback(
         df_filtered = df_parent_full.query(query_str) if query_parts else df_parent_full
         
         if len(df_filtered) < 2:
-            fig = go.Figure().update_layout(title_text='필터 조건에 맞는 데이터가 너무 적습니다.', template='plotly_dark')
-            return fig, go.Figure().update_layout(template='plotly_dark', title=""), "데이터 부족"
+            return go.Figure().update_layout(title_text='데이터가 너무 적습니다.', template='plotly_dark'), \
+                   go.Figure().update_layout(template='plotly_dark', title=""), "데이터 부족"
 
         features = df_filtered[['retracement_score', 'abs_angle_deg', 'pivot_count']].values
-        scaled_features = StandardScaler().fit_transform(features)
-        y_supervised = df_filtered['y_child_strength_label'].values
         reducer = umap.UMAP(n_neighbors=umap_neighbors, min_dist=umap_min_dist, random_state=42, target_weight=gamma)
-        embedding = reducer.fit_transform(scaled_features, y=y_supervised)
+        embedding = reducer.fit_transform(StandardScaler().fit_transform(features), y=df_filtered['y_child_strength_label'].values)
         
         hover_texts = [f"인덱스: {idx}<br>부모점수: {r['force_score']:.2f}<br>자식최대: {r['child_max_force']:.2f}<br><b>자식총점: {r['child_sum_force']:.2f}</b><br>자식등급: {r['y_child_strength_label']}" for idx, r in df_filtered.iterrows()]
         
@@ -265,30 +227,34 @@ def universal_callback(
             marker_color, colorscale, cbar_title = df_filtered['y_child_strength_label'], 'Plasma', '자식 세력 등급'
         elif color_mode == 'direction':
             marker_color, colorscale, cbar_title = df_filtered['direction'].map({1.0: 1, -1.0: 0}), [[0, 'lightcoral'], [1, 'lightgreen']], '방향'
-        ### 수정된 부분 ###
-        # '자식 총점수' 채색 시 스케일링 로직 적용
         elif color_mode == 'child_sum_force':
             colorscale, cbar_title_base = 'Cividis', '자식 총점수'
-            scores = df_filtered['child_sum_force'].values.reshape(-1, 1)
+            scores_1d = df_filtered['child_sum_force'].values
             
+            ### 수정된 부분 ###
+            # 모든 스케일링 결과가 1차원 배열이 되도록 수정
             if scaling_method == 'normalized':
-                marker_color = MinMaxScaler().fit_transform(scores)
+                # MinMaxScaler는 2D 배열을 요구하므로, 변환 후 1D로 다시 펼침
+                marker_color = MinMaxScaler().fit_transform(scores_1d.reshape(-1, 1)).flatten()
                 cbar_title = f'{cbar_title_base} (정규화)'
             elif scaling_method == 'log':
-                marker_color = np.log1p(scores)
+                # np.log1p는 1D 배열을 받아 1D 배열을 반환
+                marker_color = np.log1p(scores_1d)
                 cbar_title = f'{cbar_title_base} (로그 변환)'
             else: # 'raw'
-                marker_color = scores
+                # 원본 1D 배열을 그대로 사용
+                marker_color = scores_1d
                 cbar_title = cbar_title_base
 
         fig = go.Figure(data=[go.Scattergl(x=embedding[:, 0], y=embedding[:, 1], mode='markers', customdata=df_filtered.index.to_list(),
                                           marker=dict(size=7, color=marker_color, colorscale=colorscale, showscale=True, opacity=0.8, colorbar={'title': cbar_title}),
                                           text=hover_texts, hoverinfo='text')])
-        fig.update_layout(template='plotly_dark', title_text=f'2D UMAP 사영 | 데이터: {len(df_filtered)}개, Gamma: {gamma}', xaxis_title='UMAP 1', yaxis_title='UMAP 2', margin=dict(l=20, r=20, b=20, t=60))
+        fig.update_layout(template='plotly_dark', title_text=f'2D UMAP 사영 | 데이터: {len(df_filtered)}개, Gamma: {gamma}',
+                          xaxis_title='UMAP 1', yaxis_title='UMAP 2', margin=dict(l=20, r=20, b=20, t=60))
         return fig, go.Figure().update_layout(template='plotly_dark', title="부모 클릭 시 자식 표시"), f"필터링된 데이터: {len(df_filtered)}개"
 
     return dash.no_update, dash.no_update, dash.no_update
 
 if __name__ == '__main__':
-    print("\n### 가중 UMAP 탐색적 패턴 분석 플랫폼 v4.4 (스케일링 기능 추가) ###")
+    print("\n### 가중 UMAP 탐색적 패턴 분석 플랫폼 v4.5 (채색 버그 수정) ###")
     app.run(debug=True, port=8052)
