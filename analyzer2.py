@@ -1,5 +1,5 @@
-# analyzer2.py (최종 수정본)
-# API 파라미터 수정 및 전체 시간대 KST 적용 완료
+# analyzer_overlay.py
+# 기존 analyzer.py에서 사용자의 요청에 따라 하위 타임프레임 패턴을 오버레이하는 기능을 추가한 버전입니다. (v2 - 버그 수정)
 
 import dash
 from dash import dcc, html
@@ -12,18 +12,14 @@ import requests
 import mplfinance as mpf
 import os
 from datetime import datetime
-from zoneinfo import ZoneInfo # Python 3.9+ 시간대 라이브러리
 
 # ==============================================================================
-# ## 섹션 1: 분석/시각화 함수들
+# ## 섹션 1: 분석/시각화 함수들 (수정됨)
 # ==============================================================================
 def fetch_klines(symbol: str, timeframe: str, start_ts: int, end_ts: int) -> pd.DataFrame:
     """지정한 기간의 캔들 데이터를 서버에서 가져옵니다."""
     url = "http://localhost:8202/api/klines"
-    
-    # [수정 완료] API 요청 파라미터 키를 'interval' -> 'timeframe'으로 변경
-    params = {"symbol": symbol.upper(), "timeframe": timeframe, "startTime": start_ts, "endTime": end_ts}
-    
+    params = {"symbol": symbol.upper(), "interval": timeframe, "startTime": start_ts, "endTime": end_ts}
     print(f"데이터 서버에서 스크린샷용 데이터를 요청합니다 (Timeframe: {timeframe}, Range: {start_ts} ~ {end_ts})...")
     try:
         response = requests.get(url, params=params, timeout=60)
@@ -132,7 +128,7 @@ def build_hybrid_series_sequence(df, all_pivots, tolerance):
 
 def visualize_single_series_and_save(df, all_series, target_series, output_filename, all_pivots, timeframe="5m", lower_tf_series=None):
     """
-    차트 시각화 및 저장 (X축 포함 전체 시간대 KST 적용 완료)
+    ❗️❗️❗️ 차트 시각화 및 저장 (하위 타임프레임 오버레이 기능 추가) ❗️❗️❗️
     """
     start_ms, end_ms = target_series['shape']['x0'], target_series['shape']['x1']
 
@@ -145,23 +141,12 @@ def visualize_single_series_and_save(df, all_series, target_series, output_filen
         print(f"경고: 해당 시리즈 기간에 대한 데이터가 없어 스크린샷을 건너뜁니다: {output_filename}")
         return
 
-    # --- ❗️[최종 수정] 차트 X축 시간대 변환 ---
-    # 데이터프레임의 인덱스(시간축)를 UTC에서 KST로 변환한다.
-    # 이 코드가 없으면 mplfinance는 UTC 기준으로 X축을 그린다.
-    if not plot_df.index.tz:
-        plot_df.index = plot_df.index.tz_localize('UTC').tz_convert('Asia/Seoul')
-    else:
-        plot_df.index = plot_df.index.tz_convert('Asia/Seoul')
-    # -----------------------------------------
-
-    # 시리즈, 피봇 등 다른 그리기 로직은 그대로...
     series_to_plot = [s for s in all_series if s['shape']['x0'] >= plot_df.index.min().value//10**6 and s['shape']['x1'] <= plot_df.index.max().value//10**6]
     lines, colors, styles, widths = [], [], [], []
 
-    # (이하 시리즈, 피봇, 오버레이 그리는 코드는 이전과 동일)
+    # --- 기본 타임프레임 시리즈 그리기 ---
     for s in series_to_plot:
-        lines.append([(pd.to_datetime(s['shape']['x0'], unit='ms').tz_localize('UTC').tz_convert('Asia/Seoul'), s['shape']['y0']), 
-                      (pd.to_datetime(s['shape']['x1'], unit='ms').tz_localize('UTC').tz_convert('Asia/Seoul'), s['shape']['y1'])])
+        lines.append([(pd.to_datetime(s['shape']['x0'], unit='ms'), s['shape']['y0']), (pd.to_datetime(s['shape']['x1'], unit='ms'), s['shape']['y1'])])
         is_main, is_target = 'MAIN' in s['type'], (s['shape']['x0'] == start_ms and s['shape']['x1'] == end_ms)
         base_color = 'gold' if is_target else ('yellow' if is_main else ('deepskyblue' if 'UP' in s['type'] else 'orangered'))
         color_map = {'gold': (1.0, 0.84, 0, 0.9), 'yellow': (1.0, 1.0, 0, 0.8), 'deepskyblue': (0, 0.75, 1.0, 0.7), 'orangered': (1.0, 0.27, 0, 0.7)}
@@ -169,50 +154,48 @@ def visualize_single_series_and_save(df, all_series, target_series, output_filen
         styles.append('-' if (is_main or is_target) else '--')
         widths.append(2.5 if is_target else (2.0 if is_main else 1.5))
         
+    # --- ❗️ 하위 타임프레임 시리즈 오버레이 ❗️ ---
     if lower_tf_series:
+        print(f"하위 타임프레임 시리즈 {len(lower_tf_series)}개를 오버레이합니다.")
         lower_series_to_plot = [s for s in lower_tf_series if s['shape']['x0'] >= plot_df.index.min().value//10**6 and s['shape']['x1'] <= plot_df.index.max().value//10**6]
         for s_low in lower_series_to_plot:
-            lines.append([(pd.to_datetime(s_low['shape']['x0'], unit='ms').tz_localize('UTC').tz_convert('Asia/Seoul'), s_low['shape']['y0']), 
-                          (pd.to_datetime(s_low['shape']['x1'], unit='ms').tz_localize('UTC').tz_convert('Asia/Seoul'), s_low['shape']['y1'])])
+            lines.append([(pd.to_datetime(s_low['shape']['x0'], unit='ms'), s_low['shape']['y0']), (pd.to_datetime(s_low['shape']['x1'], unit='ms'), s_low['shape']['y1'])])
             is_main_low = 'MAIN' in s_low['type']
+            # 반투명한 회색 계열로 설정
             color_tuple = (0.8, 0.8, 0.8, 0.45) if is_main_low else (0.6, 0.6, 0.6, 0.4)
             colors.append(color_tuple)
-            styles.append(':') 
-            widths.append(1.2 if is_main_low else 1.0) 
+            styles.append(':') # 점선 스타일
+            widths.append(1.2 if is_main_low else 1.0) # 더 얇게
 
+    # --- 피봇 마커 그리기 (기존과 동일) ---
     pivots_in_range = [p for p in all_pivots if plot_df.index.min().value//10**6 <= p['time'] <= plot_df.index.max().value//10**6]
     high_pivots = [p for p in pivots_in_range if p['type'] == 'P']
     low_pivots = [p for p in pivots_in_range if p['type'] == 'T']
     addplots = []
     if high_pivots:
-        high_pivot_times = [pd.to_datetime(p['time'], unit='ms').tz_localize('UTC').tz_convert('Asia/Seoul') for p in high_pivots]
+        high_pivot_times = [pd.to_datetime(p['time'], unit='ms') for p in high_pivots]
         high_pivot_prices = [p['price'] for p in high_pivots]
         high_pivot_markers = pd.Series(np.nan, index=plot_df.index)
-        # Use reindex to handle potential missing timestamps after conversion
-        high_pivot_markers.loc[high_pivot_markers.index.intersection(high_pivot_times)] = high_pivot_prices
+        high_pivot_markers.loc[high_pivot_times] = high_pivot_prices
         if not high_pivot_markers.dropna().empty:
             ap_high = mpf.make_addplot(high_pivot_markers, type='scatter', marker='v', color=(1.0, 0.2, 0.2, 0.6), markersize=60)
             addplots.append(ap_high)
     if low_pivots:
-        low_pivot_times = [pd.to_datetime(p['time'], unit='ms').tz_localize('UTC').tz_convert('Asia/Seoul') for p in low_pivots]
+        low_pivot_times = [pd.to_datetime(p['time'], unit='ms') for p in low_pivots]
         low_pivot_prices = [p['price'] for p in low_pivots]
         low_pivot_markers = pd.Series(np.nan, index=plot_df.index)
-        low_pivot_markers.loc[low_pivot_markers.index.intersection(low_pivot_times)] = low_pivot_prices
+        low_pivot_markers.loc[low_pivot_times] = low_pivot_prices
         if not low_pivot_markers.dropna().empty:
             ap_low = mpf.make_addplot(low_pivot_markers, type='scatter', marker='^', color=(0.2, 0.8, 1.0, 0.6), markersize=60)
             addplots.append(ap_low)
 
-
-    # 차트 최종 렌더링
+    # --- 차트 최종 렌더링 및 저장 ---
     mc = mpf.make_marketcolors(up='darkorange', down='royalblue', inherit=True)
     style = mpf.make_mpf_style(marketcolors=mc, base_mpf_style='nightclouds', gridcolor='#363c4e', y_on_right=True)
     
-    start_dt_kst = pd.to_datetime(start_ms, unit='ms').tz_localize('UTC').tz_convert('Asia/Seoul')
-    title_kst_str = start_dt_kst.strftime('%Y-%m-%d %H:%M')
-    
     try:
         mpf.plot(plot_df, type='candle', style=style,
-                 title=f"Series [{timeframe.upper()}] - {title_kst_str} (KST)",
+                 title=f"Series [{timeframe.upper()}] - {pd.to_datetime(start_ms, unit='ms').strftime('%Y-%m-%d %H:%M')}",
                  alines=dict(alines=lines, colors=colors, linestyle=styles, linewidths=widths),
                  addplot=addplots if addplots else None,
                  savefig=dict(fname=output_filename, dpi=150))
@@ -221,7 +204,7 @@ def visualize_single_series_and_save(df, all_series, target_series, output_filen
         print(f"오버레이 차트 시각화 중 오류 발생: {e}")
 
 # ==============================================================================
-# ## 섹션 2: Dash 앱 레이아웃 및 컴포넌트
+# ## 섹션 2: Dash 앱 레이아웃 및 컴포넌트 (수정됨)
 # ==============================================================================
 app = dash.Dash(__name__)
 app.title = "Professional Pattern Analyzer - Overlay Dashboard"
@@ -249,6 +232,7 @@ app.layout = html.Div(style={'backgroundColor': '#1E1E1E', 'color': '#E0E0E0', '
         
         html.Div([
             html.H4("2. 필터 조건 설정", style={'marginTop': '0'}),
+            # ❗️❗️❗️ Syntax Error 수정: 'type'='number' -> type='number' ❗️❗️❗️
             dcc.Input(id='lookaround-input', type='number', value=5, style={'display': 'none'}),
             dcc.Input(id='tolerance-input', type='number', value=0.001, style={'display': 'none'}),
             html.Div([
@@ -272,7 +256,7 @@ app.layout = html.Div(style={'backgroundColor': '#1E1E1E', 'color': '#E0E0E0', '
 ])
 
 # ==============================================================================
-# ## 섹션 3: Dash 콜백
+# ## 섹션 3: Dash 콜백 (수정됨)
 # ==============================================================================
 
 @app.callback(
@@ -322,7 +306,7 @@ def update_graph_and_handle_actions(
     target_index,
     lookaround, tolerance
 ):
-    """그래프 업데이트 및 오버레이 스크린샷 생성 (시간대 보정 포함)"""
+    """❗️❗️❗️ 그래프 업데이트 및 오버레이 스크린샷 생성 ❗️❗️❗️"""
     if not analysis_data or 'vectors' not in analysis_data:
         return go.Figure().update_layout(title_text="'데이터 불러오기' 버튼을 눌러 분석 결과를 로드하세요.", template='plotly_dark'), "대기 중..."
 
@@ -357,7 +341,7 @@ def update_graph_and_handle_actions(
                 local_pivots = find_pivots_optimized(df_local, lookaround)
                 local_series_sequence = build_hybrid_series_sequence(df_local, local_pivots, tolerance)
                 
-                # --- 하위 타임프레임 데이터 로드 및 분석 로직 ---
+                # --- ❗️ 하위 타임프레임 데이터 로드 및 분석 로직 ❗️ ---
                 lower_tf_map = {'15m': '5m', '5m': '1m'}
                 lower_tf = lower_tf_map.get(timeframe)
                 lower_tf_series = None
@@ -378,13 +362,9 @@ def update_graph_and_handle_actions(
 
                 # --- 스크린샷 생성 ---
                 target_series = min(local_series_sequence, key=lambda s: abs(s['shape']['x0'] - start_ts) + abs(s['shape']['x1'] - end_ts))
+                output_filename = f"screenshot_{timeframe}_overlay_{datetime.fromtimestamp(start_ts/1000).strftime('%Y%m%d_%H%M%S')}_idx{screenshot_request_index}.png"
                 
-                # 시간대 보정 로직 (파일명용)
-                utc_dt = datetime.fromtimestamp(start_ts/1000, tz=ZoneInfo('UTC'))
-                kst_dt = utc_dt.astimezone(ZoneInfo('Asia/Seoul'))
-                output_filename = f"screenshot_{timeframe}_overlay_{kst_dt.strftime('%Y%m%d_%H%M%S')}_idx{screenshot_request_index}.png"
-                
-                # 시각화 함수에 하위 타임프레임 시리즈 전달
+                # ❗️ 시각화 함수에 하위 타임프레임 시리즈 전달
                 visualize_single_series_and_save(df_local, local_series_sequence, target_series, output_filename, local_pivots, timeframe, lower_tf_series=lower_tf_series)
                 message = f"✅ 오버레이 스크린샷 저장 완료: {output_filename}"
             else:
@@ -407,29 +387,24 @@ def update_graph_and_handle_actions(
     graph_message = f"필터링된 데이터: {len(filtered_vectors_with_indices)}개"
     final_message = message if message else graph_message
 
-    # --- 3D 플롯 생성 로직 (시간대 보정 적용) ---
+    # --- 3D 플롯 생성 로직 ---
     if not filtered_vectors_with_indices:
         return go.Figure().update_layout(title_text='필터 조건에 맞는 데이터가 없습니다.', template='plotly_dark'), final_message
 
     original_indices, filtered_vectors = zip(*filtered_vectors_with_indices)
-    
-    # 호버 텍스트의 시간도 KST로 표시
-    hover_texts = []
-    for idx, v in zip(original_indices, filtered_vectors):
-        start_kst = datetime.fromtimestamp(v[0]/1000, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Seoul'))
-        end_kst = datetime.fromtimestamp(v[1]/1000, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Seoul'))
-        hover_texts.append(
-            (f"원본 인덱스: {idx}<br>"
-             f"File: {analysis_data.get('filepath', 'N/A').split('/')[-1]}<br>"
-             f"시작 (KST): {start_kst.strftime('%y/%m/%d %H:%M')}<br>"
-             f"종료 (KST): {end_kst.strftime('%y/%m/%d %H:%M')}<br>"
-             f"--------------------<br>"
-             f"되돌림 점수: {v[2]:.2f}<br>"
-             f"피봇 개수: {v[3]}<br>"
-             f"절대 각도: {v[4]:.2f}°<br>"
-             f"방향: {'UP' if v[5] == 1.0 else 'DOWN'}")
-        )
 
+    hover_texts = [
+        (f"원본 인덱스: {idx}<br>"
+         f"File: {analysis_data.get('filepath', 'N/A').split('/')[-1]}<br>"
+         f"시작: {datetime.fromtimestamp(v[0]/1000).strftime('%y/%m/%d %H:%M')}<br>"
+         f"종료: {datetime.fromtimestamp(v[1]/1000).strftime('%y/%m/%d %H:%M')}<br>"
+         f"--------------------<br>"
+         f"되돌림 점수: {v[2]:.2f}<br>"
+         f"피봇 개수: {v[3]}<br>"
+         f"절대 각도: {v[4]:.2f}°<br>"
+         f"방향: {'UP' if v[5] == 1.0 else 'DOWN'}")
+        for idx, v in zip(original_indices, filtered_vectors)
+    ]
 
     fig = go.Figure(data=[go.Scatter3d(
         x=[v[2] for v in filtered_vectors],
@@ -454,11 +429,12 @@ def update_graph_and_handle_actions(
 # ## 섹션 4: 애플리케이션 실행
 # ==============================================================================
 if __name__ == '__main__':
+    # Add a check for a missing file to provide a better error message.
     if not os.path.exists('1m_analysis_results_5years_robust.parquet'):
         print("경고: '1m_analysis_results_5years_robust.parquet' 파일을 찾을 수 없습니다. 1분봉 데이터는 로드되지 않을 수 있습니다.")
     
     print("\n### 사용 안내 (오버레이 버전) ###")
-    print("1. 데이터 서버(servercandle.cjs)를 실행하세요.") # 서버 파일명 변경
+    print("1. 데이터 서버(server_5min.cjs)를 실행하세요.")
     print("2. 분석 결과(.parquet) 파일들이 스크립트와 같은 폴더에 있는지 확인하세요.")
     print("3. 이 대시보드 스크립트를 실행하고 웹 브라우저에서 http://127.0.0.1:8055 주소로 접속하세요.")
     print("4. 드롭다운에서 분석할 타임프레임 선택 -> '데이터 불러오기' -> (선택)필터 적용 -> 점 클릭 또는 인덱스 입력으로 스크린샷 생성.")

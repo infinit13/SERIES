@@ -204,12 +204,12 @@ if __name__ == '__main__':
     # --- 분석할 조건 설정 ---
     START_DATE_STR = '2019-12-01'
     END_DATE_STR = '2025-07-01'
-    CHUNK_FREQUENCY = '10D' # 데이터를 10일 단위로 분할
+    CHUNK_FREQUENCY = '90D' # 데이터를 10일 단위로 분할
     LOOKAROUND = 5
     TOLERANCE = 0.001
     SYMBOL = "BTCUSDT"
-    TIMEFRAME = "15m"
-    OUTPUT_FILENAME = "15m_analysis_results_5years_robust.parquet"
+    TIMEFRAME = "1d"
+    OUTPUT_FILENAME = "1d_analysis_results_5years_robust.parquet"
     CPU_CORES = 8
     # -------------------------
 

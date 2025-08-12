@@ -12,7 +12,11 @@ const port = 8202; // 서버는 이 포트 하나만 사용한다
 const timeframeToTableMap = {
   '1m': 'candles',
   '5m': 'candles5m',
-  '15m': 'candles15m'
+  '15m': 'candles15m',
+  '1h': 'candles1h',
+  '4h': 'candles4h',
+  '1d': 'candles1d'
+
   // 여기에 '1h' 등 다른 테이블도 추가하면 바로 확장 가능
   // '1h': 'candles1h',
 };
@@ -54,7 +58,7 @@ app.get('/api/klines', async (req, res, next) => {
   try {
     const symbol = req.query.symbol || 'BTCUSDT';
     // [수정] 프론트에서 요청한 timeframe을 그대로 사용. 기본값은 '1m'
-    const timeframe = req.query.timeframe || '1m';
+    const timeframe = req.query.interval || '1m'; // req.query.timeframe -> req.query.interval 로 변경
 
     // [핵심] 요청된 timeframe에 맞는 테이블 이름을 동적으로 선택
     const targetTable = timeframeToTableMap[timeframe];

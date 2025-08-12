@@ -1,4 +1,4 @@
-# batch_analyzer.py (Timeout and Small Chunks Version)
+# batch_analyzer.py (v2 - Adaptive for Large Timeframes)
 
 import pandas as pd
 import numpy as np
@@ -6,20 +6,26 @@ import requests
 import os
 import math
 from datetime import datetime
-from multiprocessing import Pool, TimeoutError # TimeoutError 임포트
+from multiprocessing import Pool, TimeoutError
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 # ==============================================================================
 # ## 섹션 1: 분석 알고리즘 (이전과 동일)
 # ==============================================================================
-# fetch_klines, find_pivots_optimized 등 모든 분석 함수는 이전과 동일하게 유지된다.
-# ... (이전 코드의 모든 분석 함수를 여기에 붙여넣기) ...
+# 이 섹션의 모든 함수(fetch_klines, find_pivots_optimized, analyze_channel, 
+# find_main_series_optimized, build_hybrid_series_sequence, 
+# extract_series_features, calculate_visual_angle, get_one_hot_for_ratio,
+# calculate_retracement_vector, process_single_series)는 이전 코드와 동일합니다.
+# 요청 핸들링 안정성을 위해 fetch_klines의 timeout만 수정합니다.
+
 def fetch_klines(symbol: str, timeframe: str, start_ts: int, end_ts: int) -> pd.DataFrame:
+    """지정한 기간의 캔들 데이터를 서버에서 가져옵니다."""
     url = "http://localhost:8202/api/klines"
     params = {"symbol": symbol.upper(), "interval": timeframe, "startTime": start_ts, "endTime": end_ts}
     print(f"데이터 서버({url})에서 타임스탬프 '{start_ts}'부터 '{end_ts}'까지 데이터를 요청합니다...")
     try:
+        # 대용량 데이터 요청을 위해 타임아웃을 넉넉하게 설정
         response = requests.get(url, params=params, timeout=300)
         response.raise_for_status()
         data = response.json()
@@ -34,6 +40,7 @@ def fetch_klines(symbol: str, timeframe: str, start_ts: int, end_ts: int) -> pd.
         print(f"데이터 가져오기 오류: {e}")
         return pd.DataFrame()
 
+# ... (이전에 제공된 나머지 모든 분석 함수를 여기에 그대로 붙여넣으세요) ...
 def find_pivots_optimized(df: pd.DataFrame, lookaround: int):
     if df.empty or len(df) < (2 * lookaround + 1): return []
     highs, lows = df['high'].values, df['low'].values
@@ -198,23 +205,47 @@ def process_single_series(args_tuple):
     return [features['start_time_timestamp'], features['end_time_timestamp'], round(retracement_score, 2), features['pivot_count'], visual_angle, 1.0 if 'UP' in features['series_type'] else -1.0]
 
 # ==============================================================================
-# ## 섹션 2: 메인 실행 로직 (분할 처리 및 타임아웃 기능 추가)
+# ## 섹션 2: 메인 실행 로직 (대규모 데이터셋 처리용으로 개선)
 # ==============================================================================
 if __name__ == '__main__':
-    # --- 분석할 조건 설정 ---
-    START_DATE_STR = '2019-12-01'
+    # --- ❗️ 분석할 조건 설정 (여기를 수정하세요) ❗️ ---
+    START_DATE_STR = '2017-01-01'
     END_DATE_STR = '2024-12-31'
-    CHUNK_FREQUENCY = '10D' # 데이터를 10일 단위로 분할
-    LOOKAROUND = 5
-    TOLERANCE = 0.001
+    TIMEFRAME = "1h"  # 분석할 타임프레임: "1m", "5m", "15m", "1h", "4h", "1D", "1W" 등
     SYMBOL = "BTCUSDT"
-    TIMEFRAME = "5m"
-    OUTPUT_FILENAME = "analysis_results_5years_robust.parquet"
-    CPU_CORES = 8
-    # -------------------------
+    TOLERANCE = 0.001
+    CPU_CORES = os.cpu_count() or 8 # 사용 가능한 모든 CPU 코어 사용
+    PROCESS_TIMEOUT_SECONDS = 300 # 각 데이터 조각의 시리즈 구성에 대한 타임아웃 (초)
 
-    print(f"--- 배치 분석 시작 ---")
-    print(f"전체 기간: {START_DATE_STR} ~ {END_DATE_STR} ({CHUNK_FREQUENCY} 단위로 분할 처리)")
+    # --- ❗️ 타임프레임에 따른 자동 설정 (특별한 경우 외에는 수정 불필요) ❗️ ---
+    # 설명: 타임프레임이 길수록 한 번에 더 많은 데이터를 처리하는 것이 효율적입니다.
+    chunk_map = {
+        '1m': '15D', '5m': '30D', '15m': '45D', '1h': '90D', 
+        '4h': '180D', '1D': '365D', '1W': '1500D', '1M': '5000D'
+    }
+    CHUNK_FREQUENCY = chunk_map.get(TIMEFRAME, '365D') # 목록에 없으면 1년 단위로 기본 설정
+
+    # 설명: 타임프레임이 길수록 적은 수의 캔들로도 의미있는 고점/저점을 식별할 수 있습니다.
+    lookaround_map = {
+        '1m': 12, '5m': 8, '15m': 5, '1h': 5, 
+        '4h': 4, '1D': 3, '1W': 2, '1M': 2
+    }
+    LOOKAROUND = lookaround_map.get(TIMEFRAME, 5) # 목록에 없으면 5로 기본 설정
+    
+    # 동적 결과 파일 이름 생성
+    OUTPUT_FILENAME = f"{TIMEFRAME}_analysis_results_{START_DATE_STR}_to_{END_DATE_STR}.parquet"
+    # ---------------------------------------------------
+
+    print("="*50)
+    print("--- 배치 분석 시작 (대용량 데이터셋 모드) ---")
+    print(f"분석 심볼: {SYMBOL}")
+    print(f"타임프레임: {TIMEFRAME}")
+    print(f"전체 기간: {START_DATE_STR} ~ {END_DATE_STR}")
+    print(f"분할 단위: {CHUNK_FREQUENCY} (자동 조정됨)")
+    print(f"Lookaround: {LOOKAROUND} (자동 조정됨)")
+    print(f"CPU 코어: {CPU_CORES}")
+    print(f"결과 파일: {OUTPUT_FILENAME}")
+    print("="*50)
     
     date_chunks = pd.date_range(start=START_DATE_STR, end=END_DATE_STR, freq=CHUNK_FREQUENCY)
     if pd.to_datetime(END_DATE_STR) not in date_chunks:
@@ -234,8 +265,8 @@ if __name__ == '__main__':
         print(f"\n--- [{i+1}/{len(date_chunks)-1}] 조각 처리 중: {chunk_start_str} ~ {chunk_end_str} ---")
         
         df = fetch_klines(SYMBOL, TIMEFRAME, start_ts, end_ts)
-        if df.empty:
-            print("해당 기간에 데이터가 없어 다음 조각으로 넘어갑니다.")
+        if df.empty or len(df) <= LOOKAROUND * 2:
+            print("해당 기간에 데이터가 없거나 분석하기에 너무 짧아 다음 조각으로 넘어갑니다.")
             continue
 
         pivots = find_pivots_optimized(df, LOOKAROUND)
@@ -245,12 +276,12 @@ if __name__ == '__main__':
             
         series_sequence = None
         try:
-            # ❗️❗️❗️ 타임아웃 로직: 1개 프로세스로 구성 작업을 시도하고 30초 이상 걸리면 건너뛴다 ❗️❗️❗️
+            # ❗️ 타임아웃 로직: 1개 프로세스로 구성 작업을 시도하고 설정된 시간 이상 걸리면 건너뜀
             with Pool(processes=1) as pool:
                 async_result = pool.apply_async(build_hybrid_series_sequence, (df, pivots, TOLERANCE))
-                series_sequence = async_result.get(timeout=30) 
+                series_sequence = async_result.get(timeout=PROCESS_TIMEOUT_SECONDS) 
         except TimeoutError:
-            print(f"경고: 시리즈 구성 작업이 30초를 초과했습니다. 이 조각({chunk_start_str})을 건너뜁니다.")
+            print(f"경고: 시리즈 구성 작업이 {PROCESS_TIMEOUT_SECONDS}초를 초과했습니다. 이 조각({chunk_start_str})을 건너뜁니다.")
             continue
         except Exception as e:
             print(f"시리즈 구성 중 예상치 못한 오류 발생: {e}")
@@ -262,7 +293,7 @@ if __name__ == '__main__':
         
         tasks = [(series_sequence[j], series_sequence[j-1] if j > 0 else None, pivots, df) for j in range(len(series_sequence))]
         
-        print(f"{len(series_sequence)}개의 시리즈에 대한 특징 벡터 계산을 시작합니다... (CPU {CPU_CORES}개 사용)")
+        print(f"{len(series_sequence)}개의 시리즈에 대한 특징 벡터 계산을 시작합니다...")
         
         with Pool(processes=CPU_CORES) as pool: 
             vectors = pool.map(process_single_series, tasks)
@@ -275,6 +306,7 @@ if __name__ == '__main__':
             table = pa.Table.from_pandas(chunk_df, preserve_index=False)
             
             if writer is None:
+                # 파일이 처음 생성될 때 스키마를 기록
                 writer = pq.ParquetWriter(OUTPUT_FILENAME, table.schema)
             
             writer.write_table(table)
