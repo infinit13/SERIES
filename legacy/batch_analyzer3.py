@@ -1,4 +1,4 @@
-# batch_analyzer.py (v4 - Dual-Layer Parallelization Engine)
+# batch_analyzer.py (v6 - Advanced Retracement Scoring)
 
 import pandas as pd
 import numpy as np
@@ -11,10 +11,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 # ==============================================================================
-# ## 섹션 1: 분석 알고리즘 (이전과 동일)
+# ## 섹션 1: 분석 알고리즘 (헬퍼 함수 추가)
 # ==============================================================================
-# fetch_klines, find_pivots_optimized 등 모든 핵심 분석 함수는 이전과 동일.
-# ... (이전 버전의 모든 분석 함수들을 여기에 붙여넣으세요) ...
+# ... fetch_klines, find_pivots_optimized 등 이전 함수들은 모두 동일 ...
 def fetch_klines(symbol: str, timeframe: str, start_ts: int, end_ts: int) -> pd.DataFrame:
     url = "http://localhost:8202/api/klines"
     params = {"symbol": symbol.upper(), "interval": timeframe, "startTime": start_ts, "endTime": end_ts}
@@ -145,67 +144,136 @@ def analyze_channel(pivots, all_pivots, df, tolerance, is_upward):
     extreme_pivot = max(pivots_in_channel, key=lambda p: p['price']) if is_upward else min(pivots_in_channel, key=lambda p: p['price'])
     return {'x0': p1['time'], 'y0': p1['price'], 'x1': extreme_pivot['time'], 'y1': extreme_pivot['price']}
 
-# --- ❗️ 새로운 '두뇌': 전술적 스코어링 엔진 ---
+
+# --- ❗️새로운 점수 계산 헬퍼 함수 ---
+def find_retracement_pattern_score(pivots_in_series, df):
+    """
+    시리즈 내에서 첫 충격파동(p1->p2) 이후, p2 가격을 깨기 전에
+    50%~82% 되돌림 영역을 터치하는 패턴이 있는지 확인하고 1점 또는 0점을 반환한다.
+    """
+    if len(pivots_in_series) < 2:
+        return 0
+
+    # 시리즈 내 첫 번째 충격 파동을 p1 -> p2로 정의
+    p1 = pivots_in_series[0]
+    p2 = pivots_in_series[1]
+
+    # p1, p2 타입이 다를 경우에만 유효한 충격 파동으로 간주
+    if p1['type'] == p2['type']:
+        return 0
+    
+    is_upward_impulse = (p1['type'] == 'T' and p2['type'] == 'P')
+    impulse_size = abs(p2['price'] - p1['price'])
+    if impulse_size == 0:
+        return 0
+
+    # 되돌림 목표 가격 구간 계산
+    if is_upward_impulse:
+        # 상승 파동에 대한 하락 되돌림
+        zone_top = p2['price'] - impulse_size * 0.50
+        zone_bottom = p2['price'] - impulse_size * 0.82
+    else:
+        # 하락 파동에 대한 상승 되돌림
+        zone_bottom = p2['price'] + impulse_size * 0.50
+        zone_top = p2['price'] + impulse_size * 0.82
+
+    # p2 가격을 돌파하는 지점 찾기
+    break_price = p2['price']
+    end_scan_pivot = None
+    for i in range(2, len(pivots_in_series)):
+        pivot = pivots_in_series[i]
+        if is_upward_impulse and pivot['price'] > break_price:
+            end_scan_pivot = pivot
+            break
+        if not is_upward_impulse and pivot['price'] < break_price:
+            end_scan_pivot = pivot
+            break
+    
+    # 스캔할 시간 범위 설정
+    start_scan_ts = p2['time']
+    end_scan_ts = end_scan_pivot['time'] if end_scan_pivot else pivots_in_series[-1]['time']
+
+    # 해당 시간 범위의 캔들 데이터 슬라이싱
+    scan_df = df[(df.index.astype(np.int64)//10**6 >= start_scan_ts) & 
+                 (df.index.astype(np.int64)//10**6 <= end_scan_ts)]
+
+    if scan_df.empty:
+        return 0
+
+    # 되돌림 영역을 터치했는지 확인
+    zone_touched = False
+    if is_upward_impulse:
+        # 상승 후 하락 되돌림이므로 low 가격이 zone에 들어왔는지 체크
+        if scan_df['low'].between(zone_bottom, zone_top).any():
+            zone_touched = True
+    else:
+        # 하락 후 상승 되돌림이므로 high 가격이 zone에 들어왔는지 체크
+        if scan_df['high'].between(zone_bottom, zone_top).any():
+            zone_touched = True
+            
+    return 1 if zone_touched else 0
+
+
+# --- ❗️핵심 수정: 새로운 스코어링 로직을 호출하는 메인 함수 ---
 def process_pivots_in_series(args_tuple):
     series_obj, series_id, all_pivots, df = args_tuple
     pivots_in_series = [p for p in all_pivots if series_obj['shape']['x0'] <= p['time'] <= series_obj['shape']['x1']]
-    if len(pivots_in_series) < 2: return []
-    cumulative_score, pivot_log_entries = 0.0, []
-    avg_volume_series = df['volume'].rolling(window=20, min_periods=1).mean()
+    
+    if len(pivots_in_series) < 2:
+        return []
+
+    # 시리즈 전체에 대한 패턴 점수 계산
+    series_score = find_retracement_pattern_score(pivots_in_series, df)
+
+    pivot_log_entries = []
     for i in range(1, len(pivots_in_series)):
-        current_pivot, prev_pivot = pivots_in_series[i], pivots_in_series[i-1]
+        current_pivot = pivots_in_series[i]
+        prev_pivot = pivots_in_series[i-1]
+        
         segment_series_obj = {'shape': {'x0': prev_pivot['time'], 'x1': current_pivot['time'], 'y0': prev_pivot['price'], 'y1': current_pivot['price']}, 'type': 'SUB'}
         segment_features = extract_series_features(segment_series_obj, df, [])
-        if not segment_features: continue
+        
+        if not segment_features:
+            continue
+            
         segment_angle = calculate_visual_angle(segment_features, df)
-        score_change = 0.0
-        if i == 2:
-            p1, p2, p3 = pivots_in_series[0], pivots_in_series[1], current_pivot
-            swing_1_2 = abs(p2['price'] - p1['price'])
-            if swing_1_2 > 0:
-                swing_2_3 = abs(p3['price'] - p2['price'])
-                retracement_ratio = swing_2_3 / swing_1_2
-                if 0.50 <= retracement_ratio <= 0.82: score_change += 10.0
-        if i == 3:
-            p1, p2, p3, p4 = pivots_in_series[0], pivots_in_series[1], pivots_in_series[2], current_pivot
-            if p1["type"]=="P" and p2["type"]=="T" and p3["type"]=="P" and p4["type"]=="T":
-                if p3["price"] < p1["price"] and p4["price"] >= p2["price"]: score_change -= 10.0
-            if p1["type"]=="T" and p2["type"]=="P" and p3["type"]=="T" and p4["type"]=="P":
-                if p3["price"] > p1["price"] and p4["price"] <= p2["price"]: score_change -= 10.0
-        pivot_time = pd.to_datetime(current_pivot['time'], unit='ms')
-        if pivot_time in avg_volume_series.index:
-            pivot_volume = df.loc[pivot_time]['volume']
-            avg_volume = avg_volume_series.loc[pivot_time]
-            score_change += pivot_volume / avg_volume if avg_volume > 0 else 1.0
-        cumulative_score += score_change
-        pivot_log_entries.append({'series_id': series_id, 'pivot_index': i, 'timestamp': current_pivot['time'], 'price': current_pivot['price'], 'type': current_pivot['type'], 'segment_angle': segment_angle, 'score_change': round(score_change, 2), 'cumulative_score': round(cumulative_score, 2)})
+        
+        # 각 피봇 로그에 시리즈 전체의 점수를 기록
+        pivot_log_entries.append({
+            'series_id': series_id, 
+            'pivot_index': i, 
+            'timestamp': current_pivot['time'], 
+            'price': current_pivot['price'], 
+            'type': current_pivot['type'], 
+            'segment_angle': segment_angle,
+            'series_score': series_score  # 시리즈 패턴 점수 추가
+        })
+        
     return pivot_log_entries
 
+
 # ==============================================================================
-# ## 섹션 2: 메인 실행 로직 (v3 - 전술적 스코어링 엔진 적용)
+# ## 섹션 2: 메인 실행 로직 (이전과 동일)
 # ==============================================================================
 if __name__ == '__main__':
-    # --- 분석 조건 설정 ---
-    START_DATE_STR = '2017-01-01'
-    END_DATE_STR = '2024-12-31'
-    TIMEFRAME = "1d"
-    # (타임프레임에 따른 자동 설정 로직은 이전과 동일)
-    chunk_map = {'1m': '15D', '5m': '30D', '15m': '45D', '1h': '90D', '4h': '180D', '1D': '365D', '1W': '1500D', '1M': '5000D'}
-    CHUNK_FREQUENCY = chunk_map.get(TIMEFRAME, '365D')
-    lookaround_map = {'1m': 12, '5m': 8, '15m': 5, '1h': 5, '4h': 4, '1D': 3, '1W': 2, '1M': 2}
+    START_DATE_STR = '2020-01-01'
+    END_DATE_STR = '2020-10-30'
+    TIMEFRAME = "15m"
+    chunk_map = {'1m': '15D', '5m': '30D', '15m': '45D', '1h': '90D', '4h': '180D', '1d': '365D', '1W': '1500D', '1M': '5000D'}
+    CHUNK_FREQUENCY = chunk_map.get(TIMEFRAME.upper(), '365D')
+    lookaround_map = {'1m': 12, '5m': 8, '15m': 5, '1h': 5, '4h': 4, '1d': 3, '1W': 2, '1M': 2}
     LOOKAROUND = lookaround_map.get(TIMEFRAME, 5)
     CPU_CORES = os.cpu_count() or 8
     PROCESS_TIMEOUT_SECONDS = 300
     TOLERANCE = 0.001
     SYMBOL = "BTCUSDT"
-    OUTPUT_FILENAME = f"{TIMEFRAME}_tactical_pivots_{START_DATE_STR}_to_{END_DATE_STR}.parquet"
+    OUTPUT_FILENAME = f"{TIMEFRAME}_pattern_scored_pivots_{START_DATE_STR}_to_{END_DATE_STR}.parquet"
     
-    # (실행 정보 출력부는 이전과 동일)
-    print("="*50); print("--- 배치 분석 시작 (v3 - 전술적 스코어링 엔진) ---"); #...
-    
+    print("="*50); print("--- 배치 분석 시작 (v6 - 되돌림 패턴 스코어링) ---"); #...
+    # ... (이하 나머지 실행 코드는 이전과 동일) ...
     date_chunks = pd.date_range(start=START_DATE_STR, end=END_DATE_STR, freq=CHUNK_FREQUENCY)
     if pd.to_datetime(END_DATE_STR) not in date_chunks:
-        date_chunks = date_chunks.append(pd.Index([pd.to_datetime(END_DATE_STR)]))
+        date_chunks = date_chunks.append(pd.Index([pd.Index([pd.to_datetime(END_DATE_STR)]).asi8.item()]))
     
     writer = None
 
