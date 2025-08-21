@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>통합 고급 분석 차트</title>
+    <title>통합 고급 분석 차트 (연계 분석 추가)</title>
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <style>
         body {
@@ -43,13 +43,6 @@
         }
         button.control-button:hover { background-color: rgba(85, 85, 85, 0.9); }
         button.control-button.active { background-color: rgba(0, 123, 255, 0.8); border-color: #007bff; }
-        #chart-container {
-            width: 95%; max-width: 1600px; height: 85vh;
-            min-height: 350px;
-            position: relative;
-            margin: 10px auto 15px auto;
-            cursor: crosshair;
-        }
         #chart-context-menu {
             position: absolute; background-color: rgba(51, 51, 51, 0.95); color: white;
             padding: 5px 0; border-radius: 5px; border: 1px solid #666;
@@ -64,11 +57,10 @@
     </style>
 </head>
 <body>
-
     <div id="integrated-controls-panel">
         <div class="ic-group">
             <span id="symbol">Symbol: BTCUSDT</span>
-            <span id="timeframe-display">Timeframe: 1M</span>
+            <span id="timeframe-display">Timeframe: 1m</span>
             <span id="countdown">Countdown: 00:00</span>
         </div>
         <div class="ic-group" id="timeframe-buttons">
@@ -83,14 +75,16 @@
             <button id="set-criterion-btn" class="control-button">기준선 분석 (C)</button>
             <button id="full-analysis-btn" class="control-button">전체 분석</button>
             <button id="auto-label-btn" class="control-button">자동 라벨링 (P/T)</button>
-             <button id="clear-shapes-btn" class="control-button">전체 삭제</button>
+            <button id="analyze-retracement-btn" class="control-button">되돌림 존 표시</button>
+            <button id="clear-shapes-btn" class="control-button">전체 삭제</button>
             <label for="lookaround-input">민감도:</label>
             <input type="number" id="lookaround-input" value="10">
             <label for="tolerance-input">이탈(%):</label>
             <input type="number" id="tolerance-input" value="0.05" step="0.01">
         </div>
         <div class="ic-group" id="drawing-controls">
-             <button id="toggle-box-drawing-button" class="control-button">📦 Box On</button>
+             <button id="toggle-box-drawing-button" class="control-button">📦 Box</button>
+             <button id="measure-tool-btn" class="control-button">📏 자</button>
         </div>
         <div class="ic-group" id="view-controls">
             <label for="x-autorange-toggle-top">X Auto:</label>
@@ -112,65 +106,43 @@
         </div>
     </div>
 
-
-    <div id="chart-container">
-        <div id="chart-context-menu">
-            <button id="delete-box" style="display:none;">Delete Box</button>
-        </div>
+    <div id="main-chart-area" style="display:flex; flex-direction:column; width:95%; max-width:1600px; height:85vh; min-height:350px; margin: 10px auto 15px auto;">
+        <div id="chart-container-top" style="flex: 1; min-height: 100px;"></div>
+        <div id="chart-container-bottom" style="flex: 1; min-height: 100px;"></div>
+    </div>
+    
+    <div id="chart-context-menu">
+        <button id="delete-box">박스 삭제</button>
     </div>
 
-    <script>
+<script>
+// 전역 변수 (선언만)
+let chartContainerTop, chartContainerBottom, xAutoRangeToggle, yAutoRangeToggle,
+    zoomInButton, zoomOutButton, zoomPriceUpButton, zoomPriceDownButton,
+    contextMenu, timeframeButtonsContainer, calendarIconButton, timeTravelPickerArea,
+    datetimePicker, loadPastDataButton, goLiveButton, toggleBoxDrawingButton, deleteBoxButton;
+
+let calculatedRetracementZones = [], isBoxDrawingEnabled = false, drawnBoxes = [], currentBoxFirstPoint = null, contextMenuTargetInfo = null,
+    isFullAnalysisDone = false, selectionBox = null, selectedSeries = [],
+    allKlinesData = {'1m':[],'5m':[],'15m':[],'1h':[],'4h':[],'1d':[]},
+    isXAutoRangeEnabled = false, isYAutoRangeEnabled = true, currentSymbol = "BTCUSDT",
+    activeAnalysisTimeframe = "15m", allWebSockets = {}, nextCandleTime = {},
+    candleIntervalMillis = {}, countdownInterval = null, chartInitialized = false,
+    fetchingMoreData = false, isInTimeTravelMode = false, isRelayouting = false;
+
+// 측정 도구 관련 전역 변수
+let isMeasureModeEnabled = false, measureStartPoint = null; 
+
+const BOX_SHAPE_NAME_PREFIX = 'userDrawnBox_', MAX_DISPLAY_CANDLES = 1000,
+    Y_AXIS_ZOOM_FACTOR = 0.05, X_AXIS_ZOOM_FACTOR = 0.10, PAN_FRACTION = 0.10,
+    CANDLES_TO_FETCH_ON_PAN = 200, INITIAL_CANDLES_TO_FETCH = 1000,
+    MAX_HISTORY = 3000, MAX_HISTORY_1M = 15000,
+    CROSSHAIR_LINE_STYLE = { color: 'grey', width: 0.5, dash: 'dash' },
+    ALL_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'];
+
 // ===================================================================================
-// 전역 변수 및 초기화
+// 함수 정의
 // ===================================================================================
-const chartContainer = document.getElementById('chart-container');
-const xAutoRangeToggle = document.getElementById('x-autorange-toggle-top');
-const yAutoRangeToggle = document.getElementById('y-autorange-toggle-top');
-const zoomInButton = document.getElementById('zoom-in');
-const zoomOutButton = document.getElementById('zoom-out');
-const zoomPriceUpButton = document.getElementById('zoom-price-up');
-const zoomPriceDownButton = document.getElementById('zoom-price-down');
-const contextMenu = document.getElementById('chart-context-menu');
-const timeframeButtonsContainer = document.getElementById('timeframe-buttons');
-const calendarIconButton = document.getElementById('calendar-icon-button');
-const timeTravelPickerArea = document.getElementById('time-travel-picker-area');
-const datetimePicker = document.getElementById('datetime-picker');
-const loadPastDataButton = document.getElementById('load-past-data-button');
-const goLiveButton = document.getElementById('go-live-button');
-const toggleBoxDrawingButton = document.getElementById('toggle-box-drawing-button');
-const deleteBoxButton = document.getElementById('delete-box');
-
-let isBoxDrawingEnabled = false;
-let drawnBoxes = [];
-let currentBoxFirstPoint = null;
-let contextMenuTargetInfo = null;
-let isFullAnalysisDone = false;
-let selectionBox = null;
-let selectedSeries = [];
-let klinesData = [];
-let isXAutoRangeEnabled = false;
-let isYAutoRangeEnabled = true;
-let currentSymbol = "BTCUSDT";
-let currentTimeframe = "1m";
-let ws = null;
-let nextCandleTime;
-let candleIntervalMillis;
-let countdownInterval = null;
-let chartInitialized = false;
-let fetchingMoreData = false;
-let fetchingFutureData = false;
-let isInTimeTravelMode = false;
-
-const BOX_SHAPE_NAME_PREFIX = 'userDrawnBox_';
-const MAX_DISPLAY_CANDLES = 1000;
-const Y_AXIS_ZOOM_FACTOR = 0.05;
-const X_AXIS_ZOOM_FACTOR = 0.10;
-const PAN_FRACTION = 0.10;
-const CANDLES_TO_FETCH_ON_PAN = 200;
-const CANDLES_TO_FETCH_ON_PAN_RIGHT = 200;
-const MAX_HISTORY = 3000;
-const CROSSHAIR_LINE_STYLE = { color: 'grey', width: 0.5, dash: 'dash' };
-
 function createDate(timestamp) { return new Date(timestamp); }
 function getHiddenCrosshairShapes() { return [{ name: "crosshair_v", visible: false }, { name: "crosshair_h", visible: false }]; }
 
@@ -181,847 +153,644 @@ function calculateCandleIntervalMillis(tf) {
     return 60000;
 }
 
+ALL_TIMEFRAMES.forEach(tf => {
+    candleIntervalMillis[tf] = calculateCandleIntervalMillis(tf);
+});
+
 function updateTopBar() {
     const timeframeDisplaySpan = document.getElementById('timeframe-display');
     const symbolSpan = document.getElementById('symbol');
     const countdownSpan = document.getElementById('countdown');
-    if (timeframeDisplaySpan) timeframeDisplaySpan.textContent = `Timeframe: ${currentTimeframe.toUpperCase()}`;
+    if (timeframeDisplaySpan) timeframeDisplaySpan.textContent = `Timeframe: ${activeAnalysisTimeframe.toUpperCase()}`;
     if (symbolSpan) symbolSpan.textContent = `Symbol: ${currentSymbol}`;
+    if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
+    
     if (isInTimeTravelMode) {
         if (countdownSpan) countdownSpan.textContent = "과거 데이터 조회 중";
-        if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
         return;
     }
+
     const now = Date.now();
-    let timeLeft = nextCandleTime - now;
-    if (!nextCandleTime || timeLeft <= -500) {
-        if (candleIntervalMillis) {
-            const currentIntervalStart = Math.floor(now / candleIntervalMillis) * candleIntervalMillis;
-            nextCandleTime = currentIntervalStart + candleIntervalMillis;
-            timeLeft = nextCandleTime - now;
-            if (timeLeft <= 0) { nextCandleTime += candleIntervalMillis; timeLeft = nextCandleTime - now; }
-        } else { timeLeft = 0; }
-    }
-    const minutes = Math.floor(timeLeft / 60000);
-    const seconds = Math.floor((timeLeft % 60000) / 1000);
-    if (countdownSpan) countdownSpan.textContent = `Countdown: ${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-    if (!countdownInterval && !isInTimeTravelMode) {
-        countdownInterval = setInterval(updateTopBar, 1000);
-    }
+    const interval = candleIntervalMillis[activeAnalysisTimeframe];
+    if (!interval) { return; }
+
+    const currentIntervalStart = Math.floor(now / interval) * interval;
+    nextCandleTime[activeAnalysisTimeframe] = currentIntervalStart + interval;
+    
+    const updateCountdown = () => {
+        const timeLeft = nextCandleTime[activeAnalysisTimeframe] - Date.now();
+        if (timeLeft <= 0) {
+            if (countdownSpan) countdownSpan.textContent = `Countdown: 00:00`;
+            setTimeout(updateTopBar, 1000);
+            return;
+        }
+        const minutes = Math.floor(timeLeft / 60000);
+        const seconds = Math.floor((timeLeft % 60000) / 1000);
+        if (countdownSpan) countdownSpan.textContent = `Countdown: ${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    };
+    
+    updateCountdown();
+    countdownInterval = setInterval(updateCountdown, 1000);
 }
 
-// ===================================================================================
-// 차트 그리기 및 업데이트
-// ===================================================================================
-function initializePlotly(initialData = []) {
-    const displayData = initialData;
-    const traceCandle = {
-        x: displayData.map(d => createDate(d[0])), open: displayData.map(d => Number(d[1])),
-        high: displayData.map(d => Number(d[2])), low: displayData.map(d => Number(d[3])),
-        close: displayData.map(d => Number(d[4])), type: 'candlestick', xaxis: 'x', yaxis: 'y',
-        increasing: { line: { color: 'darkorange' } }, decreasing: { line: { color: 'royalblue' } }, name: 'Price'
-    };
+function initializePlotly() {
+    const trace15m = {x:allKlinesData['15m'].map(d=>createDate(d[0])),open:allKlinesData['15m'].map(d=>Number(d[1])),high:allKlinesData['15m'].map(d=>Number(d[2])),low:allKlinesData['15m'].map(d=>Number(d[3])),close:allKlinesData['15m'].map(d=>Number(d[4])),type:'candlestick',xaxis:'x',yaxis:'y',increasing:{line:{color:'darkorange'}},decreasing:{line:{color:'royalblue'}},name:'15m'};
+    const layout15m = {dragmode:'pan',xaxis:{title:'시간 (KST)',type:'date',rangeslider:{visible:false},fixedrange:false,tickformat:'%y/%m/%d %H:%M',color:'#A9A9A9',gridcolor:'#404040'},yaxis:{autorange:isYAutoRangeEnabled,fixedrange:false,color:'#A9A9A9',gridcolor:'#404040'},plot_bgcolor:'#1a1a1a',paper_bgcolor:'black',font:{color:'white'},margin:{t:20,b:20,l:60,r:60},hovermode:false,showlegend:false,shapes:[...getHiddenCrosshairShapes()],annotations:[]};
+    const config = {responsive:true,displayModeBar:false,scrollZoom:false};
+    const trace1m = {x:allKlinesData['1m'].map(d=>createDate(d[0])),open:allKlinesData['1m'].map(d=>Number(d[1])),high:allKlinesData['1m'].map(d=>Number(d[2])),low:allKlinesData['1m'].map(d=>Number(d[3])),close:allKlinesData['1m'].map(d=>Number(d[4])),type:'candlestick',xaxis:'x',yaxis:'y',increasing:{line:{color:'darkorange'}},decreasing:{line:{color:'royalblue'}},name:'1m'};
+    const layout1m = {dragmode:'pan',xaxis:{title:'시간 (KST)',type:'date',rangeslider:{visible:false},fixedrange:false,tickformat:'%y/%m/%d %H:%M',color:'#A9A9A9',gridcolor:'#404040'},yaxis:{autorange:isYAutoRangeEnabled,fixedrange:false,color:'#A9A9A9',gridcolor:'#404040'},plot_bgcolor:'#1a1a1a',paper_bgcolor:'black',font:{color:'white'},margin:{t:20,b:40,l:60,r:60},hovermode:false,showlegend:false,shapes:[...getHiddenCrosshairShapes()],annotations:[]};
 
-    const layout = {
-        dragmode: 'pan',
-        xaxis: { type: 'date', rangeslider: { visible: false }, fixedrange: false, tickformat: '%y/%m/%d %H:%M', color: '#A9A9A9', gridcolor: '#404040' },
-        yaxis: { autorange: isYAutoRangeEnabled, fixedrange: false, color: '#A9A9A9', gridcolor: '#404040' },
-        plot_bgcolor: '#1a1a1a', paper_bgcolor: 'black', font: { color: 'white' },
-        margin: { t: 20, b: 40, l: 60, r: 60 }, hovermode: false, showlegend: false,
-        shapes: [...getHiddenCrosshairShapes(), ...drawnBoxes],
-        annotations: []
-    };
-    const config = { responsive: true, displayModeBar: false, scrollZoom: false };
-
-    return Plotly.newPlot(chartContainer, [traceCandle], layout, config).then(() => {
-        chartInitialized = true;
+    return Promise.all([
+        Plotly.newPlot(chartContainerTop, [trace15m], layout15m, config),
+        Plotly.newPlot(chartContainerBottom, [trace1m], layout1m, config)
+    ]).then(()=>{
+        chartInitialized=true;
         setupChartEventListeners();
-        handleDrawingToolToggle(isBoxDrawingEnabled ? 'box' : 'none');
-    }).catch(err => {
-        console.error("Error initializing Plotly:", err);
-        chartInitialized = false;
-        throw err;
-    });
-}
-
-function updateChartRange(data, forceManualX = false, forceManualY = false) {
-    if (!chartInitialized || !data || data.length === 0) return;
-    const layoutUpdate = {};
-    if (!isXAutoRangeEnabled || forceManualX) {
-        const xValues = data.map(row => createDate(row[0]));
-        if (xValues.length > 0) {
-            const lastTime = xValues[xValues.length - 1].getTime();
-            const paddingRight = candleIntervalMillis ? candleIntervalMillis * 10 : 600000;
-            let defaultStartTime = xValues.length > MAX_DISPLAY_CANDLES ? xValues[xValues.length - MAX_DISPLAY_CANDLES].getTime() : xValues[0].getTime();
-            layoutUpdate['xaxis.range'] = [createDate(defaultStartTime), createDate(lastTime + paddingRight)];
-            layoutUpdate['xaxis.autorange'] = false;
-        }
-    } else {
-        layoutUpdate['xaxis.autorange'] = true; layoutUpdate['xaxis.range'] = null;
-    }
-
-    if (!isYAutoRangeEnabled || forceManualY) {
-        let yCalcData = data;
-        if (chartContainer._fullLayout?.xaxis?.range) {
-            const xRange = chartContainer._fullLayout.xaxis.range.map(d => new Date(d).getTime());
-            yCalcData = data.filter(row => row[0] >= xRange[0] && row[0] <= xRange[1]);
-        }
-        if (yCalcData.length === 0 && data.length > 0) yCalcData = data.slice(-Math.min(data.length, MAX_DISPLAY_CANDLES));
-        if (yCalcData.length > 0) {
-            const minPrice = Math.min(...yCalcData.map(row => Number(row[3])));
-            const maxPrice = Math.max(...yCalcData.map(row => Number(row[2])));
-            if (isFinite(minPrice) && isFinite(maxPrice)) {
-                const pricePadding = (maxPrice - minPrice) * 0.1 || (minPrice * 0.005 || 0.05);
-                layoutUpdate['yaxis.range'] = [minPrice - pricePadding, maxPrice + pricePadding];
-                layoutUpdate['yaxis.autorange'] = false;
+        setTimeout(()=>{
+            if(chartContainerTop._fullLayout){
+                const synchronizedRange = chartContainerTop._fullLayout.xaxis.range;
+                Plotly.relayout(chartContainerBottom,{'xaxis.range':synchronizedRange});
             }
-        }
-    } else {
-        layoutUpdate['yaxis.autorange'] = true; layoutUpdate['yaxis.range'] = null;
-    }
-    Plotly.relayout(chartContainer, layoutUpdate);
+        },100);
+    }).catch(err=>{console.error("Error initializing Plotly:",err);chartInitialized=false;throw err;});
 }
 
-function updatePlotlyChart(data) {
-    if (!chartInitialized || !data) return;
+function updatePlotlyChart(data, targetContainer) {
+    if (!chartInitialized || !data || !targetContainer) return;
     const candleUpdate = {
         x: [data.map(row => createDate(row[0]))], open: [data.map(row => Number(row[1]))],
         high: [data.map(row => Number(row[2]))], low: [data.map(row => Number(row[3]))],
         close: [data.map(row => Number(row[4]))]
     };
-    Plotly.update(chartContainer, candleUpdate, {}, [0]);
+    Plotly.restyle(targetContainer, candleUpdate, 0);
 }
 
-// ===================================================================================
-// 데이터 로딩 (API, WebSocket)
-// ===================================================================================
-async function fetchHistoricalData(symbol, timeframe) {
-    try {
-        const response = await fetch(`/api/klines?symbol=${symbol}&timeframe=${timeframe}&limit=${MAX_DISPLAY_CANDLES}`);
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-        const data = await response.json();
-        if (Array.isArray(data) && data.length > 0) {
-            klinesData = data.map(k => [k[0], k[1], k[2], k[3], k[4], parseFloat(k[5] || 0)]).sort((a, b) => a[0] - b[0]);
-            return true;
-        }
-        klinesData = []; return false;
-    } catch (error) {
-        console.error("Failed to fetch historical data:", error);
-        klinesData = []; return false;
-    }
+async function fetchAllHistoricalData(symbol, endTime = null) {
+    const fetchPromises = ALL_TIMEFRAMES.map(async (tf) => {
+        try {
+            let limit = INITIAL_CANDLES_TO_FETCH;
+            if (tf === '1m') { limit = INITIAL_CANDLES_TO_FETCH * 15; }
+            let url = `/api/klines?symbol=${symbol}&timeframe=${tf}&limit=${limit}`;
+            if (endTime) { url += `&before=${endTime}`; }
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+            const data = await response.json();
+            if (Array.isArray(data) && data.length > 0) {
+                allKlinesData[tf] = data.map(k => [k[0], k[1], k[2], k[3], k[4], parseFloat(k[5] || 0)]).sort((a, b) => a[0] - b[0]);
+                return true;
+            }
+            allKlinesData[tf] = [];
+            return false;
+        } catch (error) { console.error(`Failed to fetch historical data for ${tf}:`, error); allKlinesData[tf] = []; return false; }
+    });
+    return (await Promise.all(fetchPromises)).every(res => res);
 }
 
-async function fetchMoreHistoricalData() {
-    if (fetchingMoreData || klinesData.length === 0) return;
+async function fetchMoreHistoricalData(targetContainer) {
+    if (fetchingMoreData) return;
     fetchingMoreData = true;
+    const timeframe = targetContainer === chartContainerTop ? '15m' : '1m';
+    const klinesData = allKlinesData[timeframe];
+    if (klinesData.length === 0) { fetchingMoreData = false; return; }
     try {
         const earliestTimeCurrent = klinesData[0][0];
-        const response = await fetch(`/api/klines?symbol=${currentSymbol}&timeframe=${currentTimeframe}&limit=${CANDLES_TO_FETCH_ON_PAN}&before=${earliestTimeCurrent}`);
+        const response = await fetch(`/api/klines?symbol=${currentSymbol}&timeframe=${timeframe}&limit=${CANDLES_TO_FETCH_ON_PAN}&before=${earliestTimeCurrent}`);
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         const data = await response.json();
         if (Array.isArray(data) && data.length > 0) {
             const newKlines = data.map(k => [k[0], k[1], k[2], k[3], k[4], parseFloat(k[5] || 0)]).sort((a, b) => a[0] - b[0]);
-            klinesData = newKlines.concat(klinesData);
-            if (klinesData.length > MAX_HISTORY) klinesData.splice(MAX_HISTORY);
-            if (chartInitialized) updatePlotlyChart(klinesData);
+            const existingTimes = new Set(klinesData.map(k => k[0]));
+            const uniqueNewKlines = newKlines.filter(k => !existingTimes.has(k[0]));
+            allKlinesData[timeframe] = uniqueNewKlines.concat(klinesData);
+            const max_history_limit = timeframe === '1m' ? MAX_HISTORY_1M : MAX_HISTORY;
+            if (allKlinesData[timeframe].length > max_history_limit) {
+                allKlinesData[timeframe].splice(0, allKlinesData[timeframe].length - max_history_limit);
+            }
+            if (chartInitialized) updatePlotlyChart(allKlinesData[timeframe], targetContainer);
         }
-    } catch (error) { console.error("Failed to fetch more historical data:", error); }
+    } catch (error) { console.error("Failed to fetch more historical data:", error); } 
     finally { fetchingMoreData = false; }
 }
 
-async function fetchFutureData(fetchStartTime, fetchEndTime) {
-    if (fetchingFutureData || !fetchStartTime || !fetchEndTime || fetchStartTime >= fetchEndTime) return;
-    if (!isInTimeTravelMode && fetchEndTime > Date.now() - (candleIntervalMillis || 60000)) return;
-    fetchingFutureData = true;
-    try {
-        const response = await fetch(`/api/klines?symbol=${currentSymbol}&timeframe=${currentTimeframe}&startTime=${fetchStartTime}&endTime=${fetchEndTime}`);
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-        const data = await response.json();
-        if (Array.isArray(data) && data.length > 0) {
-            const lastTimeInData = klinesData.length > 0 ? klinesData[klinesData.length - 1][0] : 0;
-            const uniqueNewKlines = data.map(k => [k[0], k[1], k[2], k[3], k[4], parseFloat(k[5] || 0)]).filter(nk => nk[0] > lastTimeInData);
-            if (uniqueNewKlines.length > 0) {
-                klinesData = klinesData.concat(uniqueNewKlines);
-                if (klinesData.length > MAX_HISTORY) klinesData.splice(0, klinesData.length - MAX_HISTORY);
-                if (chartInitialized) {
-                    updatePlotlyChart(klinesData);
-                    if (isXAutoRangeEnabled) updateChartRange(klinesData);
-                }
-            }
+function connectAllWebSockets(symbol) {
+    ALL_TIMEFRAMES.forEach(tf => {
+        if (allWebSockets[tf]) {
+            allWebSockets[tf].close();
         }
-    } catch (error) { console.error("Failed to fetch future data:", error); }
-    finally { fetchingFutureData = false; }
-}
+        const wsSymbol = symbol.toLowerCase();
+        const websocketURL = `wss://stream.binance.com:9443/ws/${wsSymbol}@kline_${tf}`;
+        const ws = new WebSocket(websocketURL);
+        allWebSockets[tf] = ws;
 
-async function fetchAndDisplayTimeTravelData(selectedEndTime) {
-    if (fetchingMoreData || fetchingFutureData) return;
-    chartInitialized = false; fetchingMoreData = true;
-    const calculatedStartTime = selectedEndTime - (MAX_DISPLAY_CANDLES * (candleIntervalMillis || 60000));
-    chartContainer.innerHTML = '<div style="padding: 20px; text-align: center;">과거 데이터 로딩 중...</div>';
-    if (ws) { ws.close(); ws = null; }
-    if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
-    isInTimeTravelMode = true; updateTopBar();
-    try {
-        const response = await fetch(`/api/klines?symbol=${currentSymbol}&timeframe=${currentTimeframe}&startTime=${calculatedStartTime}&endTime=${selectedEndTime}&limit=${MAX_DISPLAY_CANDLES}`);
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-        const data = await response.json();
-        if (Array.isArray(data) && data.length > 0) {
-            klinesData = data.map(k => [k[0], k[1], k[2], k[3], k[4], parseFloat(k[5] || 0)]).sort((a, b) => a[0] - b[0]);
-            drawnBoxes = [];
-            if (chartContainer._fullLayout) Plotly.purge(chartContainer);
-            
-            await initializePlotly(klinesData);
-            updateChartRange(klinesData, true, false);
+        ws.onopen = () => console.log(`WebSocket connected for ${tf}`);
 
-            timeTravelPickerArea.style.display = 'none'; goLiveButton.style.display = 'inline-block'; calendarIconButton.classList.add('active');
-        } else {
-            chartContainer.innerHTML = `<p style="color:red; padding: 20px;">데이터 로딩 실패.</p>`;
-        }
-    } catch (error) {
-        console.error("시간 여행 데이터 로딩 중 오류:", error);
-    } finally { fetchingMoreData = false; }
-}
+        ws.onmessage = (event) => {
+            if (!chartInitialized || isInTimeTravelMode) return;
+            try {
+                const k = JSON.parse(event.data).k;
+                const newKline = [parseInt(k.t), parseFloat(k.o), parseFloat(k.h), parseFloat(k.l), parseFloat(k.c), parseFloat(k.v) || 0];
+                const klinesData = allKlinesData[tf];
 
-function connectWebSocket(symbol, timeframe) {
-    if (isInTimeTravelMode) { if (ws) { ws.close(); ws = null; } return; }
-    if (ws) { ws.close(); ws = null; }
-    const wsSymbol = symbol.toLowerCase();
-    const websocketURL = `wss://stream.binance.com:9443/ws/${wsSymbol}@kline_${timeframe}`;
-    ws = new WebSocket(websocketURL);
-
-    ws.onopen = () => {
-        console.log('WebSocket connected');
-        if (klinesData.length > 0) { nextCandleTime = klinesData[klinesData.length - 1][0] + candleIntervalMillis; }
-        updateTopBar();
-    };
-
-    ws.onmessage = (event) => {
-        if (!chartInitialized) return;
-        try {
-            const k = JSON.parse(event.data).k;
-            const newKline = [parseInt(k.t), parseFloat(k.o), parseFloat(k.h), parseFloat(k.l), parseFloat(k.c), parseFloat(k.v) || 0];
-            if (klinesData.length === 0) { klinesData.push(newKline); }
-            else {
-                const lastKlineTime = klinesData[klinesData.length - 1][0];
-                if (newKline[0] === lastKlineTime) { klinesData[klinesData.length - 1] = newKline; }
-                else if (newKline[0] > lastKlineTime) {
+                if (klinesData.length === 0) {
                     klinesData.push(newKline);
-                    if (klinesData.length > MAX_HISTORY) klinesData.shift();
-                    nextCandleTime = newKline[0] + candleIntervalMillis;
+                } else {
+                    const lastKlineTime = klinesData[klinesData.length - 1][0];
+                    if (newKline[0] === lastKlineTime) {
+                        klinesData[klinesData.length - 1] = newKline;
+                    } else if (newKline[0] > lastKlineTime) {
+                        klinesData.push(newKline);
+                        const max_history_limit = tf === '1m' ? MAX_HISTORY_1M : MAX_HISTORY;
+                        if (klinesData.length > max_history_limit) klinesData.shift();
+                    }
                 }
-            }
-            updatePlotlyChart(klinesData);
-            if (isXAutoRangeEnabled || isYAutoRangeEnabled) updateChartRange(klinesData);
-        } catch (error) { console.error("WS Error:", error); }
-    };
 
-    ws.onclose = () => { console.log('WS disconnected.'); ws = null; };
-    ws.onerror = (err) => { console.error('WS error:', err); ws = null; };
+                if (tf === '15m' && chartContainerTop) {
+                    updatePlotlyChart(allKlinesData['15m'], chartContainerTop);
+                } else if (tf === '1m' && chartContainerBottom) {
+                    updatePlotlyChart(allKlinesData['1m'], chartContainerBottom);
+                    updateAllActiveZones();
+                }
+
+            } catch (error) {
+                console.error(`WS Error for ${tf}:`, error);
+            }
+        };
+
+        ws.onclose = (event) => {
+            console.log(`WS disconnected for ${tf}. Reason: ${event.reason}`);
+            allWebSockets[tf] = null;
+            setTimeout(() => {
+                if (isInTimeTravelMode) return;
+                console.log(`Reconnecting WS for ${tf}...`);
+                connectAllWebSockets(symbol);
+            }, 5000);
+        };
+
+        ws.onerror = (err) => {
+            console.error(`WS error for ${tf}:`, err);
+            ws.close();
+        };
+    });
 }
 
-// ===================================================================================
-// 차트 초기화 및 이벤트 리스너 설정
-// ===================================================================================
-async function initializeCharts(symbol, timeframe) {
-    chartInitialized = false; isInTimeTravelMode = false;
-    calendarIconButton.classList.remove('active');
-    goLiveButton.style.display = 'none';
-    timeTravelPickerArea.style.display = 'none';
-    drawnBoxes = []; currentBoxFirstPoint = null;
-    isBoxDrawingEnabled = false; handleDrawingToolToggle('none');
+function disconnectAllWebSockets() {
+    ALL_TIMEFRAMES.forEach(tf => {
+        if (allWebSockets[tf]) { allWebSockets[tf].close(); allWebSockets[tf] = null; }
+    });
+    console.log("All WebSockets disconnected.");
+}
 
-    if (chartContainer._fullLayout) Plotly.purge(chartContainer);
-    chartContainer.innerHTML = '<div style="padding: 20px; text-align: center;">데이터 로딩 중...</div>';
-    candleIntervalMillis = calculateCandleIntervalMillis(timeframe);
-    if (countdownInterval) clearInterval(countdownInterval);
-    if (ws) ws.close();
-    const historicalDataLoaded = await fetchHistoricalData(symbol, timeframe);
-    if (!historicalDataLoaded) {
-        chartContainer.innerHTML = `<p style="color:red; padding: 20px;">데이터 로딩 실패.</p>`;
-        return;
-    }
+async function initializeCharts(symbol, timeTravelEndTime = null) {
+    isInTimeTravelMode = !!timeTravelEndTime;
+    if(calendarIconButton) calendarIconButton.classList.toggle('active', isInTimeTravelMode);
+    if(goLiveButton) goLiveButton.style.display = isInTimeTravelMode ? 'block' : 'none';
+    if(timeTravelPickerArea) timeTravelPickerArea.style.display = 'none';
     
-    await initializePlotly(klinesData);
-    updateChartRange(klinesData);
+    handleDrawingToolToggle('none');
 
+    if (chartContainerTop && chartContainerTop._fullLayout) Plotly.purge(chartContainerTop);
+    if (chartContainerBottom && chartContainerBottom._fullLayout) Plotly.purge(chartContainerBottom);
+    if(chartContainerTop) chartContainerTop.innerHTML = '<div style="padding: 20px; text-align: center;">데이터 로딩 중...</div>';
+    if(chartContainerBottom) chartContainerBottom.innerHTML = '<div style="padding: 20px; text-align: center;">데이터 로딩 중...</div>';
+    disconnectAllWebSockets();
+    await fetchAllHistoricalData(symbol, timeTravelEndTime);
+    await initializePlotly();
+    activeAnalysisTimeframe = '15m';
+    if (!isInTimeTravelMode) connectAllWebSockets(symbol);
     updateTopBar();
-    connectWebSocket(symbol, timeframe);
-    updateActiveTimeframeButton(timeframe);
+    updateActiveTimeframeButton(activeAnalysisTimeframe);
 }
 
 function setupChartEventListeners() {
     document.removeEventListener('keydown', handleKeyDown);
-    chartContainer.removeEventListener('wheel', handleWheelZoom);
-    chartContainer.removeEventListener('click', handleChartClick);
-    chartContainer.removeEventListener('contextmenu', handleContextMenu);
-    chartContainer.removeEventListener('mousemove', handleMouseMove);
-    chartContainer.removeEventListener('mouseleave', handleMouseLeave);
-    if (chartContainer.off) chartContainer.off('plotly_relayout', handleRelayout);
+    chartContainerTop.removeEventListener('wheel', handleWheelZoom);
+    chartContainerBottom.removeEventListener('wheel', handleWheelZoom);
+    chartContainerTop.removeEventListener('click', handleChartClick);
+    chartContainerBottom.removeEventListener('click', handleChartClick);
+    chartContainerTop.removeEventListener('contextmenu', handleContextMenu);
+    chartContainerBottom.removeEventListener('contextmenu', handleContextMenu);
+    chartContainerTop.removeEventListener('mousemove', handleMouseMove);
+    chartContainerBottom.removeEventListener('mousemove', handleMouseMove);
+    chartContainerTop.removeEventListener('mouseleave', handleMouseLeave);
+    chartContainerBottom.removeEventListener('mouseleave', handleMouseLeave);
+    if (chartContainerTop.off) chartContainerTop.off('plotly_relayout');
+    if (chartContainerBottom.off) chartContainerBottom.off('plotly_relayout');
 
     document.addEventListener('keydown', handleKeyDown);
-    chartContainer.addEventListener('wheel', handleWheelZoom, { passive: false });
-    chartContainer.addEventListener('click', handleChartClick);
-    chartContainer.addEventListener('contextmenu', handleContextMenu);
-    chartContainer.addEventListener('mousemove', handleMouseMove);
-    chartContainer.addEventListener('mouseleave', handleMouseLeave);
-    if (chartContainer.on) chartContainer.on('plotly_relayout', handleRelayout);
+    chartContainerTop.addEventListener('wheel', handleWheelZoom, { passive: false });
+    chartContainerBottom.addEventListener('wheel', handleWheelZoom, { passive: false });
+    chartContainerTop.addEventListener('click', handleChartClick);
+    chartContainerBottom.addEventListener('click', handleChartClick);
+    chartContainerTop.addEventListener('contextmenu', handleContextMenu);
+    chartContainerBottom.addEventListener('contextmenu', handleContextMenu);
+    chartContainerTop.addEventListener('mousemove', handleMouseMove);
+    chartContainerBottom.addEventListener('mousemove', handleMouseMove);
+    chartContainerTop.addEventListener('mouseleave', handleMouseLeave);
+    chartContainerBottom.addEventListener('mouseleave', handleMouseLeave);
+    if (chartContainerTop.on) chartContainerTop.on('plotly_relayout', handleRelayout);
+    if (chartContainerBottom.on) chartContainerBottom.on('plotly_relayout', handleRelayout);
 
-    zoomInButton.addEventListener('click', () => zoomTime(true));
-    zoomOutButton.addEventListener('click', () => zoomTime(false));
-    zoomPriceUpButton.addEventListener('click', () => adjustPriceScale(true));
-    zoomPriceDownButton.addEventListener('click', () => adjustPriceScale(false));
-    toggleBoxDrawingButton.addEventListener('click', () => handleDrawingToolToggle('box'));
-    deleteBoxButton.addEventListener('click', handleDeleteBox);
-    xAutoRangeToggle.addEventListener('change', handleXAutoRangeToggle);
-    yAutoRangeToggle.addEventListener('change', handleYAutoRangeToggle);
-    calendarIconButton.addEventListener('click', handleCalendarIconClick);
-    loadPastDataButton.addEventListener('click', handleLoadPastDataClick);
-    goLiveButton.addEventListener('click', () => initializeCharts(currentSymbol, currentTimeframe));
+    zoomInButton.onclick = () => zoomTime(true);
+    zoomOutButton.onclick = () => zoomTime(false);
+    zoomPriceUpButton.onclick = () => adjustPriceScale(true);
+    zoomPriceDownButton.onclick = () => adjustPriceScale(false);
 
-    document.getElementById("set-criterion-btn").addEventListener("click", triggerAnalysisAtCenter);
-    document.getElementById("clear-shapes-btn").addEventListener("click", clearAllShapes);
-    document.getElementById("auto-label-btn").addEventListener("click", performAutoLabeling);
-    document.getElementById("full-analysis-btn").addEventListener("click", analyzeEntireChart);
+    document.getElementById('toggle-box-drawing-button').onclick = () => handleDrawingToolToggle('box');
+    document.getElementById('measure-tool-btn').onclick = () => handleDrawingToolToggle('measure');
+
+    deleteBoxButton.onclick = handleDeleteBox;
+    xAutoRangeToggle.onchange = handleXAutoRangeToggle;
+    yAutoRangeToggle.onchange = handleYAutoRangeToggle;
+    calendarIconButton.onclick = handleCalendarIconClick;
+    loadPastDataButton.onclick = handleLoadPastDataClick;
+    goLiveButton.onclick = () => initializeCharts(currentSymbol);
+    document.getElementById("set-criterion-btn").onclick = triggerAnalysisAtCenter;
+    document.getElementById("full-analysis-btn").onclick = analyzeEntireChart;
+    document.getElementById("auto-label-btn").onclick = performAutoLabeling;
+    document.getElementById("analyze-retracement-btn").onclick = triggerRetracementAnalysis;
+    document.getElementById("clear-shapes-btn").onclick = clearAllShapes;
 }
 
 // ===================================================================================
-// 💥 최종 하이브리드 분석 엔진 (2025-08-01 버전)
+// 측정 관련 유틸리티 함수
 // ===================================================================================
+function formatTimeDuration(ms) {
+    if (ms < 0) ms = -ms;
+    const days = Math.floor(ms / (24 * 60 * 60 * 1000));
+    ms %= (24 * 60 * 60 * 1000);
+    const hours = Math.floor(ms / (60 * 60 * 1000));
+    ms %= (60 * 60 * 1000);
+    const minutes = Math.floor(ms / (60 * 1000));
 
-/**
- * 💥 [메인] 전체 차트를 분석하여 메인/서브 시리즈를 모두 식별하고 텐서로 변환한다.
- */
-function analyzeEntireChart() {
+    let result = '';
+    if (days > 0) result += `${days}일 `;
+    if (hours > 0) result += `${hours}시간 `;
+    if (minutes > 0) result += `${minutes}분`;
+    return result.trim();
+}
+
+function clearMeasureShapes() {
+    [chartContainerTop, chartContainerBottom].forEach(chartDiv => {
+        if (!chartDiv || !chartDiv.layout) return;
+        const preservedShapes = (chartDiv.layout.shapes || []).filter(s => !s.name?.startsWith("measure_"));
+        const preservedAnnotations = (chartDiv.layout.annotations || []).filter(a => !a.name?.startsWith("measure_"));
+        Plotly.relayout(chartDiv, { shapes: preservedShapes, annotations: preservedAnnotations });
+    });
+}
+
+// ===================================================================================
+// 분석 엔진
+// ===================================================================================
+function analyzeRetracementPatterns() {
+    const klines15m = allKlinesData['15m'];
+    const lookaround = parseInt(document.getElementById('lookaround-input').value, 10);
+    if (klines15m.length < lookaround * 2) return [];
+
+    const { allPivots } = findPivots(0, klines15m, lookaround );
+    const pivots = consolidatePivots(allPivots);
+    const zones = [];
+
+    for (let i = 0; i < pivots.length - 1; i++) {
+        const p0 = pivots[i];     // Trough
+        const p1 = pivots[i + 1]; // Peak
+
+        if (p0.type === 'T' && p1.type === 'P') {
+            const swingRange = p1.price - p0.price;
+            if (swingRange < p1.price * (0.3 / 100)) continue;
+
+            const r50 = p1.price - 0.50 * swingRange;
+            const r82 = p1.price - 0.82 * swingRange;
+
+            zones.push({
+                type: 'rect', name: `retracement_zone_${p1.time}`, layer: 'below',
+                xref: 'x', yref: 'y',
+                x0: createDate(p1.time),
+                y0: Math.min(r50, r82),
+                x1: createDate(p1.time + (50 * 15 * 60 * 1000)),
+                y1: Math.max(r50, r82),
+                fillcolor: 'rgba(0, 123, 255, 0.1)',
+                line: { color: 'rgba(0, 123, 255, 0.4)', width: 1, dash: 'dot' },
+                source_p0_time: p0.time,
+                source_p0_price: p0.price,
+                source_p1_price: p1.price
+            });
+        }
+    }
+    return zones;
+}
+
+function triggerRetracementAnalysis() {
     if (!chartInitialized) return;
-    clearAllShapes();
-    console.log("하이브리드 분석 엔진 가동...");
-
-    // --- 1. 기본 데이터 준비 ---
-    const lookaround = parseInt(document.getElementById('lookaround-input').value, 10);
-    if (isNaN(lookaround)) { console.error("Lookaround 값이 유효하지 않습니다."); return; }
-    const { allPivots: rawPivots } = findPivots(0, klinesData, lookaround);
-    const allPivots = consolidatePivots(rawPivots);
-    if (allPivots.length < 2) { console.log("분석할 피봇이 부족합니다."); return; }
-    const toleranceFactors = {
-        lower: 1 - ((parseFloat(document.getElementById('tolerance-input').value) || 0) / 100),
-        upper: 1 + ((parseFloat(document.getElementById('tolerance-input').value) || 0) / 100)
-    };
-
-    // --- 2. 메인 시리즈 식별 (기존 로직 활용) ---
-    const mainSeriesShapes = findMainSeries(allPivots, toleranceFactors);
-
-    // --- 3. 모든 시리즈(메인/서브)를 포함하는 통합 시퀀스 생성 ---
-    const consolidatedSeries = [];
-    let lastProcessedPivotIndex = -1;
-
-    // 메인 시리즈와 그 사이의 갭을 처리
-    for (let i = 0; i < mainSeriesShapes.length; i++) {
-        const mainSeries = mainSeriesShapes[i];
-        
-        // --- 3a. 이전 메인 시리즈의 끝 ~ 현재 메인 시리즈의 시작까지 갭 처리 ---
-        const mainSeriesStartIndex = allPivots.findIndex(p => p.time === new Date(mainSeries.x0).getTime());
-        if (mainSeriesStartIndex > lastProcessedPivotIndex + 1) {
-            const gapPivots = allPivots.slice(lastProcessedPivotIndex + 1, mainSeriesStartIndex + 1);
-            for (let j = 0; j < gapPivots.length - 1; j++) {
-                consolidatedSeries.push(createSeriesShape(gapPivots[j], gapPivots[j + 1], 'SUB'));
-            }
-        }
-        
-        // --- 3b. 메인 시리즈 추가 ---
-        consolidatedSeries.push(mainSeries);
-        lastProcessedPivotIndex = allPivots.findIndex(p => p.time === new Date(mainSeries.x1).getTime());
-    }
-
-    // --- 3c. 마지막 메인 시리즈 이후의 피봇들을 서브 시리즈로 처리 ---
-    if (lastProcessedPivotIndex < allPivots.length - 1) {
-        const remainingPivots = allPivots.slice(lastProcessedPivotIndex + 1);
-        for (let i = 0; i < remainingPivots.length - 1; i++) {
-            consolidatedSeries.push(createSeriesShape(remainingPivots[i], remainingPivots[i + 1], 'SUB'));
-        }
-    }
-
-    // --- 4. 최종 분석 및 시각화 ---
-    analyzeAndVectorizeAllSeries(consolidatedSeries, allPivots);
-    const shapesToDraw = consolidatedSeries.map(s => s.shape);
-    drawAnalysisResults({ shapes: shapesToDraw, annotations: [] });
-
-    isFullAnalysisDone = true;
-    toggleBoxDrawingButton.textContent = '💎 시리즈 선택';
-}
-
-
-/**
- * [HELPER] `analyzeEntireChart`의 일부로, 메인 시리즈만 찾아내는 함수.
- */
-function findMainSeries(allPivots, toleranceFactors) {
-    const mainSeriesShapes = [];
-    const allTroughs = allPivots.filter(p => p.type === 'T');
-    const allPeaks = allPivots.filter(p => p.type === 'P');
-    let searchFromTime = klinesData.length > 0 ? klinesData[0][0] : 0;
-    const endTime = klinesData.length > 0 ? klinesData[klinesData.length - 1][0] : 0;
-
-    while (searchFromTime < endTime) {
-        let nextPattern = { startTime: Infinity, type: null };
-        for (let i = 0; i < allTroughs.length - 1; i++) {
-            if (allTroughs[i].time >= searchFromTime && allTroughs[i + 1].price > allTroughs[i].price) {
-                nextPattern = { startTime: allTroughs[i].time, type: 'up' };
-                break;
-            }
-        }
-        for (let i = 0; i < allPeaks.length - 1; i++) {
-            if (allPeaks[i].time >= searchFromTime && allPeaks[i + 1].price < allPeaks[i].price) {
-                if (allPeaks[i].time < nextPattern.startTime) {
-                    nextPattern = { startTime: allPeaks[i].time, type: 'down' };
-                }
-                break;
-            }
-        }
-
-        if (nextPattern.type === null) break;
-
-        const pivotContext = allPivots.filter(p => p.time >= nextPattern.startTime).slice(0, 20);
-        let yellowLine = null;
-
-        if (nextPattern.type === 'up') {
-            const analysisResult = analyzeUpwardChannel(pivotContext, allPivots, klinesData, toleranceFactors);
-            yellowLine = analysisResult.shapes.find(s => s.name === 'analysis_connecting_line_up');
-        } else if (nextPattern.type === 'down') {
-            const analysisResult = analyzeDownwardChannel(pivotContext, allPivots, klinesData, toleranceFactors);
-            yellowLine = analysisResult.shapes.find(s => s.name === 'analysis_connecting_line_down');
-        }
-
-        if (yellowLine) {
-            const seriesType = yellowLine.name.includes('up') ? 'MAIN_UP' : 'MAIN_DOWN';
-            mainSeriesShapes.push({
-                type: seriesType,
-                shape: { ...yellowLine, line: { color: 'rgba(255, 255, 0, 0.6)', width: 2.5, dash: 'solid' } }
-            });
-            searchFromTime = new Date(yellowLine.x1).getTime();
-        } else {
-            searchFromTime = nextPattern.startTime + (candleIntervalMillis || 300000);
-        }
-    }
-    return mainSeriesShapes.sort((a,b) => new Date(a.shape.x0).getTime() - new Date(b.shape.x0).getTime());
-}
-
-/**
- * [HELPER] 두 피봇을 받아 서브 시리즈 객체를 생성한다.
- */
-function createSeriesShape(p1, p2, typePrefix) {
-    const isUp = p2.price > p1.price;
-    const seriesType = `${typePrefix}_${isUp ? 'UP' : 'DOWN'}`;
-    return {
-        type: seriesType,
-        shape: {
-            name: `series_${p1.time}_${p2.time}`,
-            type: 'line', layer: 'below', xref: 'x', yref: 'y',
-            x0: createDate(p1.time), y0: p1.price,
-            x1: createDate(p2.time), y1: p2.price,
-            line: { color: isUp ? 'rgba(0, 150, 255, 0.7)' : 'rgba(255, 140, 0, 0.7)', width: 1.5, dash: 'dash' }
-        }
-    };
-}
-
-
-/**
- * 💥 [마스터 분석] 모든 시리즈(메인/서브)의 시퀀스를 받아 분석하고 텐서화한다.
- */
-function analyzeAndVectorizeAllSeries(seriesSequence, allPivots) {
-    if (!seriesSequence || seriesSequence.length === 0) {
-        console.log("분석할 시리즈 시퀀스가 없습니다.");
-        return;
-    }
-
-    let previousSeriesFeatures = null;
-    const analysisResults = [];
-    const finalTensors = [];
-
-    for (const series of seriesSequence) {
-        const features = extractSeriesFeatures(series, allPivots);
-        if (!features) continue;
-
-        const tensor = calculateTensor(features, previousSeriesFeatures);
-
-        analysisResults.push(features);
-        finalTensors.push(tensor);
-        previousSeriesFeatures = features; // 다음 루프를 위해 현재 시리즈를 이전 시리즈로 저장
-    }
-
-    // --- 최종 결과 출력 ---
-    console.clear();
-    console.log(`%c--- 🔥 하이브리드 시리즈 분석 결과 (${analysisResults.length}개) 🔥 ---`, "color: yellow; font-size: 1.2em; font-weight: bold;");
-    console.log(`%c[📊 시리즈 상세 정보]`, "color: cyan; font-weight: bold;");
-    console.table(analysisResults.map(r => ({
-        series_id: r.series_id, series_type: r.series_type,
-        start_time: new Date(r.start_time_timestamp).toLocaleString(),
-        end_time: new Date(r.end_time_timestamp).toLocaleString(),
-        slope: r.slope, total_volume: r.total_volume, pivot_count: r.pivot_count
-    })));
-
-    console.log(`%c[💥 최종 텐서 시퀀스 (${finalTensors.length} x 141차원)]`, "color: tomato; font-weight: bold; font-size: 1.1em");
-    console.log(finalTensors);
-}
-
-/**
- * 💥 [특성 추출] 단일 시리즈(메인/서브)의 특성을 추출하여 객체로 반환한다.
- */
-function extractSeriesFeatures(seriesObject, allPivots) {
-    const { shape, type } = seriesObject;
-    const startTimeMs = new Date(shape.x0).getTime();
-    const endTimeMs = new Date(shape.x1).getTime();
-    const seriesKlines = klinesData.filter(k => k[0] >= startTimeMs && k[0] <= endTimeMs);
-    const internalPivots = allPivots.filter(p => p.time > startTimeMs && p.time < endTimeMs);
-
-    const totalVolume = seriesKlines.reduce((sum, k) => sum + (k[5] || 0), 0);
-    const durationSec = (endTimeMs - startTimeMs) / 1000;
-    const slope = durationSec > 0 ? (shape.y1 - shape.y0) / durationSec : 0;
-    const swing = shape.y1 - shape.y0;
-
-    return {
-        series_id: shape.name, series_type: type,
-        start_time_timestamp: startTimeMs, end_time_timestamp: endTimeMs,
-        start_price: shape.y0, end_price: shape.y1,
-        slope: slope.toExponential(2), total_volume: totalVolume.toFixed(2),
-        duration_sec: durationSec, swing: swing,
-        pivot_count: internalPivots.length + 2,
-        internal_pivots: internalPivots, // 텐서 계산 시 필요
-    };
-}
-
-
-/**
- * 💥 [텐서 계산] 단일 시리즈의 특성 객체를 받아 최종 141차원 텐서를 계산한다.
- */
-function calculateTensor(features, prevFeatures) {
-    const vector = new Array(141).fill(0);
-
-    // --- 1. 타입 원핫 인코딩 (2차원) ---
-    vector[0] = features.series_type.includes('UP') ? 1 : 0;
-    vector[1] = features.series_type.includes('DOWN') ? 1 : 0;
-
-    // --- 2. 공통 특성 (4차원) ---
-    vector[2] = parseFloat(features.duration_sec);
-    vector[3] = parseFloat(features.slope);
-    vector[4] = parseFloat(features.total_volume);
-    vector[5] = parseFloat(features.pivot_count);
-
-    // --- 3. 되돌림 DNA 계산 (135차원) ---
-    const retraceVector = calculateRetracementVector(features, prevFeatures);
-    for (let i = 0; i < retraceVector.length; i++) {
-        vector[6 + i] = retraceVector[i];
-    }
     
-    return vector.map(v => parseFloat(v.toFixed(6)));
+    let zones = analyzeRetracementPatterns();
+
+    const klines1m = allKlinesData['1m'];
+    zones.forEach(zone => {
+        const zoneStartTime = new Date(zone.x0).getTime();
+        const blueZoneBottom = zone.y0;
+        
+        const breakoutCandle = klines1m.find(k => k[0] >= zoneStartTime && Number(k[3]) < blueZoneBottom);
+        
+        zone.breakoutTime = breakoutCandle ? breakoutCandle[0] : Infinity;
+    });
+
+    calculatedRetracementZones = zones;
+
+    const topShapes = (chartContainerTop.layout.shapes || []).filter(s => !s.name?.startsWith('retracement_zone_') && !s.name?.startsWith('active_'));
+    Plotly.relayout(chartContainerTop, { shapes: [...topShapes, ...calculatedRetracementZones] });
+    
+    const bottomShapes = (chartContainerBottom.layout.shapes || []).filter(s => !s.name?.startsWith('retracement_zone_') && !s.name?.startsWith('active_'));
+    Plotly.relayout(chartContainerBottom, { shapes: [...bottomShapes, ...calculatedRetracementZones] });
+    
+    console.log(`[분석 완료] ${calculatedRetracementZones.length}개의 되돌림 존 계산. 하방 이탈 규칙이 적용됩니다.`);
+    
+    updateAllActiveZones();
 }
 
-/**
- * 💥 [되돌림 계산] 시리즈 타입에 따라 되돌림 벡터(135차원)를 계산하는 핵심 로직.
- */
-function calculateRetracementVector(features, prevFeatures) {
-    const vector = new Array(135).fill(0);
-    const MAX_SEQUENCES_TO_ENCODE = 15;
-    const NUM_CATEGORIES = 9;
+function updateAllActiveZones() {
+    if (!chartInitialized || !chartContainerBottom._fullLayout || calculatedRetracementZones.length === 0) return;
 
-    if (features.series_type.startsWith('MAIN')) {
-        // [MAIN 시리즈 로직] 내부 되돌림 계산
-        const internalPivotsWithEnds = [
-            { time: features.start_time_timestamp, price: features.start_price, type: features.series_type.includes('UP') ? 'T' : 'P' },
-            ...features.internal_pivots,
-            { time: features.end_time_timestamp, price: features.end_price, type: features.series_type.includes('UP') ? 'P' : 'T' }
-        ];
+    const visibleRange = chartContainerBottom._fullLayout.xaxis.range;
+    const startTime = new Date(visibleRange[0]).getTime();
+    const endTime = new Date(visibleRange[1]).getTime();
+    const visibleKlines = allKlinesData['1m'].filter(k => k[0] >= startTime && k[0] <= endTime);
+    const lookaround = parseInt(document.getElementById('lookaround-input').value, 10);
+    const { allPivots } = findPivots(0, allKlinesData['1m'], lookaround);
+    const pivots1m = consolidatePivots(allPivots);
+    const activeShapes = [], onAnnotations = [], tpConfirmationShapes = [];
+    const processedTroughs = new Set();
+    const successScenarioShapes = [];
+    const failedScenarioShapes = [];
 
-        let sequenceCount = 0;
-        if (internalPivotsWithEnds.length >= 3) {
-            for (let i = 2; i < internalPivotsWithEnds.length && sequenceCount < MAX_SEQUENCES_TO_ENCODE; i++) {
-                const p0 = internalPivotsWithEnds[i - 2], p1 = internalPivotsWithEnds[i - 1], p2 = internalPivotsWithEnds[i];
-                if (p0.type !== p1.type && p1.type !== p2.type) {
-                    let swing_range = 0, retracement_amount = 0;
-                    if (p0.type === 'T') { // T-P-T
-                        swing_range = p1.price - p0.price; retracement_amount = p1.price - p2.price;
-                    } else { // P-T-P
-                        swing_range = p0.price - p1.price; retracement_amount = p2.price - p1.price;
+    for (const candle of visibleKlines) {
+        const candleTime = candle[0];
+        const candleHigh = Number(candle[2]);
+        const candleLow = Number(candle[3]);
+
+        for (const zone of calculatedRetracementZones) {
+            const zoneEndTime = new Date(zone.x1).getTime();
+            const validEndTime = Math.min(zoneEndTime, zone.breakoutTime);
+
+            if (candleTime >= validEndTime) continue;
+
+            const zoneStartTime = new Date(zone.x0).getTime();
+            
+            if (candleTime >= zoneStartTime && Math.max(candleLow, zone.y0) <= Math.min(candleHigh, zone.y1)) {
+                const tPivotIndex = pivots1m.findIndex(p => p.time > candleTime && p.type === 'T');
+                if (tPivotIndex === -1 || tPivotIndex >= pivots1m.length - 1 || processedTroughs.has(pivots1m[tPivotIndex].time)) continue;
+
+                const tPivot = pivots1m[tPivotIndex];
+                const pPivot = pivots1m[tPivotIndex + 1];
+                if (pPivot.type !== 'P') continue;
+                
+                if (pPivot.time >= validEndTime) continue;
+                processedTroughs.add(tPivot.time);
+
+                const tpSwing = pPivot.price - tPivot.price;
+                if (tpSwing <= 0) continue;
+                const tpRetracementZone = { top: pPivot.price - 0.50 * tpSwing, bottom: pPivot.price - 0.82 * tpSwing };
+
+                const klinesAfterPeak = allKlinesData['1m'].filter(k => k[0] > pPivot.time);
+                const entryCandle = klinesAfterPeak.find(k => Number(k[3]) <= tpRetracementZone.top);
+                
+                if (!entryCandle || entryCandle[0] >= validEndTime) continue;
+
+                const klinesAfterEntry = klinesAfterPeak.filter(k => k[0] >= entryCandle[0]);
+                let isTpZoneBroken = false;
+                for (const k of klinesAfterEntry) {
+                    if (k[0] >= validEndTime) break; 
+                    if (Number(k[3]) < tpRetracementZone.bottom) {
+                        isTpZoneBroken = true;
+                        break;
                     }
+                }
+                if (isTpZoneBroken) continue;
+                
+                tpConfirmationShapes.push({
+                    type: 'rect', name: `tp_confirmation_${tPivot.time}`, layer: 'below',
+                    xref: 'x', yref: 'y',
+                    x0: createDate(tPivot.time), y0: tPivot.price,
+                    x1: createDate(pPivot.time), y1: pPivot.price,
+                    fillcolor: 'rgba(255, 0, 0, 0.2)',
+                    line: { color: 'rgba(255, 80, 80, 0.9)', width: 1.5, dash: 'solid' }
+                });
 
-                    if (swing_range > 0) {
-                        const ratio = retracement_amount / swing_range;
-                        const oneHot = getOneHotVectorForRatio(ratio, NUM_CATEGORIES);
-                        oneHot.forEach((val, idx) => {
-                            vector[sequenceCount * NUM_CATEGORIES + idx] = val;
-                        });
-                        sequenceCount++;
+                const peak15m_price = zone.source_p1_price;
+                const red_box_low = tPivot.price;
+                const klinesAfterRedBox = allKlinesData['1m'].filter(k => k[0] > pPivot.time);
+                
+                let breakoutCandle = null;
+                let invalidationCandle = null;
+
+                for (const k of klinesAfterRedBox) {
+                    if (Number(k[3]) < red_box_low) {
+                        invalidationCandle = k;
+                        break; 
                     }
+                    if (k[0] >= validEndTime) {
+                        break;
+                    }
+                    if (Number(k[2]) > peak15m_price) {
+                        breakoutCandle = k;
+                        break;
+                    }
+                }
+
+                if (invalidationCandle) {
+                    failedScenarioShapes.push({
+                        type: 'rect', name: `failed_scenario_${tPivot.time}`, layer: 'below',
+                        xref: 'x', yref: 'y',
+                        x0: createDate(tPivot.time),
+                        y0: pPivot.price,
+                        x1: createDate(invalidationCandle[0]),
+                        y1: invalidationCandle[3],
+                        fillcolor: 'rgba(255, 165, 0, 0.15)',
+                        line: { color: 'rgba(255, 165, 0, 0.7)', width: 1.5, dash: 'dash' }
+                    });
+                } else if (breakoutCandle) {
+                    successScenarioShapes.push({
+                        type: 'rect', name: `success_scenario_${zone.source_p0_time}`, layer: 'below',
+                        xref: 'x', yref: 'y',
+                        x0: createDate(zone.source_p0_time),
+                        y0: zone.source_p0_price,
+                        x1: createDate(breakoutCandle[0]),
+                        y1: breakoutCandle[2],
+                        fillcolor: 'rgba(0, 255, 100, 0.1)',
+                        line: { color: 'rgba(0, 255, 100, 0.7)', width: 2, dash: 'solid' }
+                    });
                 }
             }
         }
-    } else if (features.series_type.startsWith('SUB')) {
-        // [SUB 시리즈 로직] 외부 되돌림 계산
-        if (prevFeatures && prevFeatures.swing !== 0) {
-            const ratio = Math.abs(features.swing) / Math.abs(prevFeatures.swing);
-            const oneHot = getOneHotVectorForRatio(ratio, NUM_CATEGORIES);
-            oneHot.forEach((val, idx) => {
-                vector[idx] = val; // 135칸 중 맨 앞에만 채움
-            });
-        }
     }
-    return vector;
-}
 
-/**
- * [HELPER] 되돌림 비율을 받아 9개 카테고리의 원핫 벡터를 반환한다.
- */
-function getOneHotVectorForRatio(ratio, numCategories) {
-    const oneHotVector = new Array(numCategories).fill(0);
-    const absRatioPercent = Math.abs(ratio * 100);
-    let categoryIndex = -1;
-    if (absRatioPercent < 35.5) categoryIndex = 0;
-    else if (absRatioPercent < 58.5) categoryIndex = 1;
-    else if (absRatioPercent < 74.5) categoryIndex = 2;
-    else if (absRatioPercent < 91) categoryIndex = 3;
-    else if (absRatioPercent < 100) categoryIndex = 4;
-    else if (absRatioPercent < 125) categoryIndex = 5;
-    else if (absRatioPercent < 200) categoryIndex = 6;
-    else if (absRatioPercent <= 300) categoryIndex = 7;
-    else categoryIndex = 8;
-    if (categoryIndex !== -1) { oneHotVector[categoryIndex] = 1; }
-    return oneHotVector;
-}
-
-// ===================================================================================
-// 기존 분석 유틸리티 함수 (채널 분석 등)
-// ===================================================================================
-function triggerAnalysis(timestamp) {
-    clearAnalysisShapes();
-    const lookaround = parseInt(document.getElementById('lookaround-input').value, 10);
-    const tolerancePercent = parseFloat(document.getElementById('tolerance-input').value) || 0;
-    const toleranceFactors = { lower: 1 - (tolerancePercent / 100), upper: 1 + (tolerancePercent / 100) };
-    if (isNaN(lookaround) || lookaround < 1) return;
-
-    const { allPivots, closestPivots } = findPivots(timestamp, klinesData, lookaround);
-    let shapes = [{ name: 'analysis_vline', type: 'line', xref: 'x', yref: 'paper', x0: createDate(timestamp), x1: createDate(timestamp), y0: 0, y1: 1, line: { color: 'rgba(255, 255, 255, 0.4)', width: 1, dash: 'longdash' } }];
-    let annotations = [];
-
-    if (closestPivots && closestPivots.length > 0) {
-        const analysisResult = analyzeChannelAndConnections(closestPivots, allPivots, klinesData, toleranceFactors);
-        shapes.push(...analysisResult.shapes);
-        annotations.push(...analysisResult.annotations);
-    }
-    drawAnalysisResults({ shapes, annotations });
-}
-
-function drawAnalysisResults({ shapes, annotations }) {
-    const existingAnnotations = (chartContainer._fullLayout.annotations || []).filter(a => !a.name?.startsWith('analysis_') && !a.name?.startsWith('auto_'));
-    Plotly.relayout(chartContainer, {
-        shapes: [...getHiddenCrosshairShapes(), ...drawnBoxes, ...shapes],
-        annotations: [...existingAnnotations, ...annotations]
+    const existingShapes = (chartContainerBottom.layout.shapes || []).filter(
+        s => !s.name?.startsWith('active_') && 
+             !s.name?.startsWith('tp_confirmation_') && 
+             !s.name?.startsWith('success_scenario_') &&
+             !s.name?.startsWith('failed_scenario_')
+    );
+    const existingAnnotations = (chartContainerBottom.layout.annotations || []).filter(
+        a => !a.name?.startsWith('on_annotation_')
+    );
+    Plotly.relayout(chartContainerBottom, {
+        shapes: [...existingShapes, ...activeShapes, ...tpConfirmationShapes, ...successScenarioShapes, ...failedScenarioShapes],
+        annotations: [...existingAnnotations, ...onAnnotations]
     });
 }
 
-function clearAnalysisShapes() {
-    const nonAnalysisShapes = (chartContainer._fullLayout.shapes || []).filter(s => !s.name?.startsWith('analysis_'));
-    const nonAnalysisAnnotations = (chartContainer._fullLayout.annotations || []).filter(a => !a.name?.startsWith('analysis_'));
-    Plotly.relayout(chartContainer, { shapes: nonAnalysisShapes, annotations: nonAnalysisAnnotations });
+function analyzeLinkedPattern() {
+    console.log("15m-1m 연계 분석 기능이 비활성화되었습니다.");
+    return { shapes: [], annotations: [], count: 0 };
 }
 
-function clearAllShapes() {
-    drawnBoxes = []; currentBoxFirstPoint = null; selectionBox = null;
-    selectedSeries = []; isFullAnalysisDone = false;
-    toggleBoxDrawingButton.textContent = '📦 Box On';
-    Plotly.relayout(chartContainer, { shapes: getHiddenCrosshairShapes(), annotations: [] });
+function triggerLinkedAnalysis() {
+    if (!chartInitialized) return;
+    console.log("15m-1m 연계 분석 버튼이 비활성화되었습니다.");
+    // ...
 }
 
-function findPivots(timestamp, data, lookaround) {
-    const allPivots = [];
-    for (let i = lookaround; i < data.length - lookaround; i++) {
-        const windowData = data.slice(i - lookaround, i + lookaround + 1);
-        const currentCandle = data[i];
-        if (currentCandle[2] >= Math.max(...windowData.map(d => d[2]))) {
-            allPivots.push({ time: currentCandle[0], price: currentCandle[2], type: 'P', distance: Math.abs(currentCandle[0] - timestamp) });
-        }
-        if (currentCandle[3] <= Math.min(...windowData.map(d => d[3]))) {
-            allPivots.push({ time: currentCandle[0], price: currentCandle[3], type: 'T', distance: Math.abs(currentCandle[0] - timestamp) });
-        }
-    }
-    if (timestamp === 0) {
-        allPivots.sort((a, b) => a.time - b.time);
-        return { allPivots };
-    }
-    const pivotsOnRight = allPivots.filter(pivot => pivot.time > timestamp).sort((a, b) => a.distance - b.distance);
-    return { allPivots, closestPivots: pivotsOnRight.slice(0, 20) };
-}
-
-function consolidatePivots(pivots) {
-    if (!pivots || pivots.length === 0) return [];
-    const consolidated = []; let i = 0;
-    while (i < pivots.length) {
-        const currentPivot = pivots[i], group = [currentPivot]; let j = i + 1;
-        while (j < pivots.length && pivots[j].type === currentPivot.type) { group.push(pivots[j]); j++; }
-        if (group.length > 1) {
-            if (currentPivot.type === 'P') { consolidated.push(group.reduce((max, p) => p.price > max.price ? p : max, group[0])); }
-            else { consolidated.push(group.reduce((min, p) => p.price < min.price ? p : min, group[0])); }
-            i = j;
-        } else { consolidated.push(currentPivot); i++; }
-    }
-    return consolidated;
-}
-
-function analyzeChannelAndConnections(closestPivots, allPivots, klinesData, toleranceFactors) {
-    const initialShapes = [], initialAnnotations = [];
-    const pivotsSortedByTime = [...closestPivots].sort((a, b) => a.time - b.time);
-    pivotsSortedByTime.forEach((pivot, index) => {
-        initialAnnotations.push({ name: `analysis_label_${index}`, x: createDate(pivot.time), y: pivot.price, text: pivot.type, showarrow: true, arrowhead: 4, ax: 0, ay: pivot.type === 'P' ? -25 : 25, bgcolor: pivot.type === 'P' ? 'rgba(255,100,0,0.7)' : 'rgba(0,100,255,0.7)', font: { color: 'white' } });
-        if (index > 0) {
-            const startPivot = pivotsSortedByTime[index - 1];
-            initialShapes.push({ name: `analysis_zigzag_${index - 1}`, type: 'line', layer: 'below', xref: 'x', yref: 'y', x0: createDate(startPivot.time), y0: startPivot.price, x1: createDate(pivot.time), y1: pivot.price, line: { color: 'rgba(255, 255, 255, 0.5)', width: 1, dash: 'dash' } });
-        }
-    });
-    const upTrendResult = analyzeUpwardChannel(closestPivots, allPivots, klinesData, toleranceFactors);
-    const downTrendResult = analyzeDownwardChannel(closestPivots, allPivots, klinesData, toleranceFactors);
-    return { shapes: [...initialShapes, ...upTrendResult.shapes, ...downTrendResult.shapes], annotations: [...initialAnnotations, ...upTrendResult.annotations, ...downTrendResult.annotations] };
-}
-
-function analyzeUpwardChannel(closestPivots, allPivots, klinesData, toleranceFactors) {
-    const shapes = [], annotations = [];
-    const troughs = closestPivots.filter(p => p.type === 'T').sort((a, b) => a.time - b.time);
-    if (troughs.length < 2) return { shapes, annotations };
-    const t1 = troughs[0], t2 = troughs[1];
-    if (t2.price < t1.price) {
-        annotations.push({ name: 'analysis_label_uptrend_end_pre', x: createDate(t2.time), y: t2.price, text: '<b>상승 추세 종료 (T < T-1)</b>', showarrow: true, arrowhead: 7, ax: 0, ay: 40, bgcolor: 'darkred', bordercolor: 'white', borderwidth: 1, font: { color: 'white', size: 12 } });
-        return { shapes, annotations };
-    }
-    const slope = (t2.price - t1.price) / (t2.time - t1.time);
-    if (t2.time === t1.time) return { shapes, annotations };
-    const xRange = chartContainer._fullLayout.xaxis.range, xStartTimestamp = new Date(xRange[0]).getTime(), xEndTimestamp = new Date(xRange[1]).getTime() + (24 * 60 * 60 * 1000);
-    shapes.push({ name: 'analysis_trendline_up', type: 'line', layer: 'below', xref: 'x', yref: 'y', x0: createDate(xStartTimestamp), y0: slope * (xStartTimestamp - t1.time) + t1.price, x1: createDate(xEndTimestamp), y1: slope * (xEndTimestamp - t1.time) + t1.price, line: { color: 'cyan', width: 1.5, dash: 'dot' } });
-    const firstP = closestPivots.filter(p => p.type === 'P').sort((a, b) => a.time - b.time)[0];
-    const breakthroughP = allPivots.filter(p => p.type === 'P' && p.time > firstP?.time && p.price > firstP?.price).sort((a, b) => a.time - b.time)[0];
-    if (!breakthroughP) return { shapes, annotations };
-    annotations.push({ name: `analysis_label_p_minus`, x: createDate(breakthroughP.time), y: breakthroughP.price, text: 'P-', showarrow: true, arrowhead: 4, ax: 0, ay: -35, bgcolor: 'rgba(255, 20, 147, 0.9)', font: { color: 'white', size: 14 } });
-    shapes.push({ name: 'analysis_parallel_line_up', type: 'line', layer: 'below', xref: 'x', yref: 'y', x0: createDate(xStartTimestamp), y0: slope * (xStartTimestamp - breakthroughP.time) + breakthroughP.price, x1: createDate(xEndTimestamp), y1: slope * (xEndTimestamp - breakthroughP.time) + breakthroughP.price, line: { color: 'cyan', width: 1.5, dash: 'dot' } });
-    let lowerBreakoutCandle = null, upperBreakoutCandle = null;
-    const startIndex = klinesData.findIndex(k => k[0] > t2.time);
-    if (startIndex !== -1) {
-        for (let i = startIndex; i < klinesData.length; i++) {
-            const candle = klinesData[i], candleTime = candle[0], candleHigh = candle[2], candleLow = candle[3];
-            if (!lowerBreakoutCandle) {
-                const lowerBoundary = slope * (candleTime - t1.time) + t1.price;
-                if (candleLow < (lowerBoundary * toleranceFactors.lower)) lowerBreakoutCandle = candle;
-            }
-            if (!upperBreakoutCandle && candleTime > breakthroughP.time) {
-                const upperBoundary = slope * (candleTime - breakthroughP.time) + breakthroughP.price;
-                if (candleHigh > (upperBoundary * toleranceFactors.upper)) upperBreakoutCandle = candle;
-            }
-            if (lowerBreakoutCandle && (upperBreakoutCandle || candleTime <= breakthroughP.time)) break;
-            if (lowerBreakoutCandle && upperBreakoutCandle) break;
-        }
-    }
-    if (lowerBreakoutCandle) annotations.push({ name: 'analysis_label_break_down_upchannel', x: createDate(lowerBreakoutCandle[0]), y: lowerBreakoutCandle[3], text: '<b>하단 이탈</b>', showarrow: true, arrowhead: 7, ax: 0, ay: 40, bgcolor: 'rgba(255, 140, 0, 0.8)', bordercolor: 'white', borderwidth: 1, font: { color: 'white', size: 12 } });
-    if (upperBreakoutCandle) annotations.push({ name: 'analysis_label_break_up_upchannel', x: createDate(upperBreakoutCandle[0]), y: upperBreakoutCandle[2], text: '<b>상단 돌파</b>', showarrow: true, arrowhead: 7, ax: 0, ay: -40, bgcolor: 'rgba(0, 150, 255, 0.8)', bordercolor: 'white', borderwidth: 1, font: { color: 'white', size: 12 } });
-    const firstBreakoutTime = [lowerBreakoutCandle, upperBreakoutCandle].filter(Boolean).reduce((min, c) => Math.min(min, c[0]), Infinity);
-    const channelEndTime = (firstBreakoutTime === Infinity) ? klinesData[klinesData.length - 1][0] : firstBreakoutTime;
-    const peaksInChannel = allPivots.filter(p => p.type === 'P' && p.time >= t1.time && p.time < channelEndTime);
-    if (peaksInChannel.length > 0) {
-        const highestPeakInChannel = peaksInChannel.reduce((max, p) => p.price > max.price ? p : max);
-        shapes.push({ name: 'analysis_connecting_line_up', type: 'line', layer: 'below', xref: 'x', yref: 'y', x0: createDate(t1.time), y0: t1.price, x1: createDate(highestPeakInChannel.time), y1: highestPeakInChannel.price });
-    }
-    return { shapes, annotations };
-}
-
-function analyzeDownwardChannel(closestPivots, allPivots, klinesData, toleranceFactors) {
-    const shapes = [], annotations = [];
-    const peaks = closestPivots.filter(p => p.type === 'P').sort((a, b) => a.time - b.time);
-    if (peaks.length < 2) return { shapes, annotations };
-    const p1 = peaks[0], p2 = peaks[1];
-    if (p2.price > p1.price) {
-        annotations.push({ name: 'analysis_label_downtrend_end_pre', x: createDate(p2.time), y: p2.price, text: '<b>하락 추세 종료 (P > P-1)</b>', showarrow: true, arrowhead: 7, ax: 0, ay: -40, bgcolor: 'darkgreen', bordercolor: 'white', borderwidth: 1, font: { color: 'white', size: 12 } });
-        return { shapes, annotations };
-    }
-    const slope = (p2.price - p1.price) / (p2.time - p1.time);
-    if (p2.time === p1.time) return { shapes, annotations };
-    const xRange = chartContainer._fullLayout.xaxis.range, xStartTimestamp = new Date(xRange[0]).getTime(), xEndTimestamp = new Date(xRange[1]).getTime() + (24 * 60 * 60 * 1000);
-    shapes.push({ name: 'analysis_trendline_down', type: 'line', layer: 'below', xref: 'x', yref: 'y', x0: createDate(xStartTimestamp), y0: slope * (xStartTimestamp - p1.time) + p1.price, x1: createDate(xEndTimestamp), y1: slope * (xEndTimestamp - p1.time) + p1.price, line: { color: 'magenta', width: 1.5, dash: 'dot' } });
-    const firstT = closestPivots.filter(p => p.type === 'T').sort((a, b) => a.time - b.time)[0];
-    const breakthroughT = allPivots.filter(p => p.type === 'T' && p.time > firstT?.time && p.price < firstT?.price).sort((a, b) => a.time - b.time)[0];
-    if (!breakthroughT) return { shapes, annotations };
-    annotations.push({ name: `analysis_label_t_plus`, x: createDate(breakthroughT.time), y: breakthroughT.price, text: 'T+', showarrow: true, arrowhead: 4, ax: 0, ay: 35, bgcolor: 'rgba(20, 255, 147, 0.9)', font: { color: 'white', size: 14 } });
-    shapes.push({ name: 'analysis_parallel_line_down', type: 'line', layer: 'below', xref: 'x', yref: 'y', x0: createDate(xStartTimestamp), y0: slope * (xStartTimestamp - breakthroughT.time) + breakthroughT.price, x1: createDate(xEndTimestamp), y1: slope * (xEndTimestamp - breakthroughT.time) + breakthroughT.price, line: { color: 'magenta', width: 1.5, dash: 'dot' } });
-    let upperBreakoutCandle = null, lowerBreakoutCandle = null;
-    const startIndex = klinesData.findIndex(k => k[0] > p2.time);
-    if (startIndex !== -1) {
-        for (let i = startIndex; i < klinesData.length; i++) {
-            const candle = klinesData[i], candleTime = candle[0], candleHigh = candle[2], candleLow = candle[3];
-            if (!upperBreakoutCandle) {
-                const upperBoundary = slope * (candleTime - p1.time) + p1.price;
-                if (candleHigh > (upperBoundary * toleranceFactors.upper)) upperBreakoutCandle = candle;
-            }
-            if (!lowerBreakoutCandle && candleTime > breakthroughT.time) {
-                const lowerBoundary = slope * (candleTime - breakthroughT.time) + breakthroughT.price;
-                if (candleLow < (lowerBoundary * toleranceFactors.lower)) lowerBreakoutCandle = candle;
-            }
-            if (upperBreakoutCandle && (lowerBreakoutCandle || candleTime <= breakthroughT.time)) break;
-            if (upperBreakoutCandle && lowerBreakoutCandle) break;
-        }
-    }
-    if (upperBreakoutCandle) annotations.push({ name: 'analysis_label_break_up_downchannel', x: createDate(upperBreakoutCandle[0]), y: upperBreakoutCandle[2], text: '<b>상단 돌파</b>', showarrow: true, arrowhead: 7, ax: 0, ay: -40, bgcolor: 'rgba(0, 150, 255, 0.8)', bordercolor: 'white', borderwidth: 1, font: { color: 'white', size: 12 } });
-    if (lowerBreakoutCandle) annotations.push({ name: 'analysis_label_break_down_downchannel', x: createDate(lowerBreakoutCandle[0]), y: lowerBreakoutCandle[3], text: '<b>하단 이탈</b>', showarrow: true, arrowhead: 7, ax: 0, ay: 40, bgcolor: 'rgba(255, 140, 0, 0.8)', bordercolor: 'white', borderwidth: 1, font: { color: 'white', size: 12 } });
-    const firstBreakoutTime = [upperBreakoutCandle, lowerBreakoutCandle].filter(Boolean).reduce((min, c) => Math.min(min, c[0]), Infinity);
-    const channelEndTime = (firstBreakoutTime === Infinity) ? klinesData[klinesData.length - 1][0] : firstBreakoutTime;
-    const troughsInChannel = allPivots.filter(p => p.type === 'T' && p.time >= p1.time && p.time < channelEndTime);
-    if (troughsInChannel.length > 0) {
-        const lowestTroughInChannel = troughsInChannel.reduce((min, p) => p.price < min.price ? p : min);
-        shapes.push({ name: 'analysis_connecting_line_down', type: 'line', layer: 'below', xref: 'x', yref: 'y', x0: createDate(p1.time), y0: p1.price, x1: createDate(lowestTroughInChannel.time), y1: lowestTroughInChannel.price });
-    }
-    return { shapes, annotations };
-}
+function analyzeEntireChart(){if(!chartInitialized)return;const targetContainer=activeAnalysisTimeframe==='1m'?chartContainerBottom:chartContainerTop;clearAllShapes();console.log("하이브리드 분석 엔진 가동...");const klinesData=allKlinesData[activeAnalysisTimeframe];const lookaround=parseInt(document.getElementById('lookaround-input').value,10);if(isNaN(lookaround)){console.error("Lookaround 값이 유효하지 않습니다.");return;}
+const{allPivots:rawPivots}=findPivots(0,klinesData,lookaround);const allPivots=consolidatePivots(rawPivots);if(allPivots.length<2){console.log("분석할 피봇이 부족합니다.");return;}
+const toleranceFactors={lower:1-((parseFloat(document.getElementById('tolerance-input').value)||0)/100),upper:1+((parseFloat(document.getElementById('tolerance-input').value)||0)/100)};const mainSeriesShapes=findMainSeries(allPivots,toleranceFactors);const consolidatedSeries=[];let lastProcessedPivotIndex=-1;for(let i=0;i<mainSeriesShapes.length;i++){const mainSeries=mainSeriesShapes[i];const mainSeriesStartIndex=allPivots.findIndex(p=>p.time===new Date(mainSeries.shape.x0).getTime());if(mainSeriesStartIndex>lastProcessedPivotIndex+1){const gapPivots=allPivots.slice(lastProcessedPivotIndex+1,mainSeriesStartIndex+1);for(let j=0;j<gapPivots.length-1;j++){consolidatedSeries.push(createSeriesShape(gapPivots[j],gapPivots[j+1],'SUB'));}}
+consolidatedSeries.push(mainSeries);lastProcessedPivotIndex=allPivots.findIndex(p=>p.time===new Date(mainSeries.shape.x1).getTime());}
+if(lastProcessedPivotIndex<allPivots.length-1){const remainingPivots=allPivots.slice(lastProcessedPivotIndex+1);for(let i=0;i<remainingPivots.length-1;i++){consolidatedSeries.push(createSeriesShape(remainingPivots[i],remainingPivots[i+1],'SUB'));}}
+analyzeAndVectorizeAllSeries(consolidatedSeries,allPivots);const shapesToDraw=consolidatedSeries.map(s=>s.shape);drawAnalysisResults({shapes:shapesToDraw,annotations:[]},targetContainer);isFullAnalysisDone=true;handleDrawingToolToggle('box');}
+function findMainSeries(allPivots,toleranceFactors){const klinesData=allKlinesData[activeAnalysisTimeframe];const mainSeriesShapes=[];const allTroughs=allPivots.filter(p=>p.type==='T');const allPeaks=allPivots.filter(p=>p.type==='P');let searchFromTime=klinesData.length>0?klinesData[0][0]:0;const endTime=klinesData.length>0?klinesData[klinesData.length-1][0]:0;const targetContainer=activeAnalysisTimeframe==='1m'?chartContainerBottom:chartContainerTop;while(searchFromTime<endTime){let nextPattern={startTime:Infinity,type:null};for(let i=0;i<allTroughs.length-1;i++){if(allTroughs[i].time>=searchFromTime&&allTroughs[i+1].price>allTroughs[i].price){nextPattern={startTime:allTroughs[i].time,type:'up'};break;}}
+for(let i=0;i<allPeaks.length-1;i++){if(allPeaks[i].time>=searchFromTime&&allPeaks[i+1].price<allPeaks[i].price){if(allPeaks[i].time<nextPattern.startTime){nextPattern={startTime:allPeaks[i].time,type:'down'};}
+break;}}
+if(nextPattern.type===null)break;const pivotContext=allPivots.filter(p=>p.time>=nextPattern.startTime).slice(0,20);let yellowLine=null;if(nextPattern.type==='up'){const analysisResult=analyzeUpwardChannel(pivotContext,allPivots,klinesData,toleranceFactors,targetContainer);yellowLine=analysisResult.shapes.find(s=>s.name==='analysis_connecting_line_up');}else if(nextPattern.type==='down'){const analysisResult=analyzeDownwardChannel(pivotContext,allPivots,klinesData,toleranceFactors,targetContainer);yellowLine=analysisResult.shapes.find(s=>s.name==='analysis_connecting_line_down');}
+if(yellowLine){const seriesType=yellowLine.name.includes('up')?'MAIN_UP':'MAIN_DOWN';const shape={...yellowLine,line:{color:'rgba(255, 255, 0, 0.6)',width:2.5,dash:'solid'},name:`series_${new Date(yellowLine.x0).getTime()}_${new Date(yellowLine.x1).getTime()}`};mainSeriesShapes.push({type:seriesType,shape});searchFromTime=new Date(yellowLine.x1).getTime();}else{searchFromTime=nextPattern.startTime+(candleIntervalMillis[activeAnalysisTimeframe]||300000);}}
+return mainSeriesShapes.sort((a,b)=>new Date(a.shape.x0).getTime()-new Date(b.shape.x0).getTime());}
+function createSeriesShape(p1,p2,typePrefix){const isUp=p2.price>p1.price;const seriesType=`${typePrefix}_${isUp?'UP':'DOWN'}`;return{type:seriesType,shape:{name:`series_${p1.time}_${p2.time}`,type:'line',layer:'below',xref:'x',yref:'y',x0:createDate(p1.time),y0:p1.price,x1:createDate(p2.time),y1:p2.price,line:{color:isUp?'rgba(0, 150, 255, 0.7)':'rgba(255, 140, 0, 0.7)',width:1.5,dash:'dash'}}}}
+function analyzeAndVectorizeAllSeries(seriesSequence,allPivots){if(!seriesSequence||seriesSequence.length===0){console.log("분석할 시리즈 시퀀스가 없습니다.");return;}
+const klinesData=allKlinesData[activeAnalysisTimeframe];let previousSeriesFeatures=null;const analysisResults=[];const finalTensors=[];for(const series of seriesSequence){const features=extractSeriesFeatures(series,allPivots);if(!features)continue;const tensor=calculateTensor(features,previousSeriesFeatures);analysisResults.push(features);finalTensors.push(tensor);previousSeriesFeatures=features;}
+console.log(`%c--- 🔥 하이브리드 시리즈 분석 결과 (${analysisResults.length}개) 🔥 ---`,"color: yellow; font-size: 1.2em; font-weight: bold;");console.log(`%c[📊 시리즈 상세 정보]`,"color: cyan; font-weight: bold;");console.table(analysisResults.map(r=>({series_id:r.series_id,series_type:r.series_type,start_time:new Date(r.start_time_timestamp).toLocaleString(),end_time:new Date(r.end_time_timestamp).toLocaleString(),slope:r.slope,total_volume:r.total_volume,pivot_count:r.pivot_count})));console.log(`%c[💥 최종 텐서 시퀀스 (${finalTensors.length} x 141차원)]`,"color: tomato; font-weight: bold; font-size: 1.1em");console.log(finalTensors);}
+function extractSeriesFeatures(seriesObject,allPivots){const klinesData=allKlinesData[activeAnalysisTimeframe];const{shape,type}=seriesObject;const startTimeMs=new Date(shape.x0).getTime();const endTimeMs=new Date(shape.x1).getTime();const seriesKlines=klinesData.filter(k=>k[0]>=startTimeMs&&k[0]<=endTimeMs);const internalPivots=allPivots.filter(p=>p.time>startTimeMs&&p.time<endTimeMs);const totalVolume=seriesKlines.reduce((sum,k)=>sum+(k[5]||0),0);const durationSec=(endTimeMs-startTimeMs)/1000;const slope=durationSec>0?(shape.y1-shape.y0)/durationSec:0;const swing=shape.y1-shape.y0;return{series_id:shape.name,series_type:type,start_time_timestamp:startTimeMs,end_time_timestamp:endTimeMs,start_price:shape.y0,end_price:shape.y1,slope:slope.toExponential(2),total_volume:totalVolume.toFixed(2),duration_sec:durationSec,swing:swing,pivot_count:internalPivots.length+2,internal_pivots:internalPivots,};}
+function calculateTensor(features,prevFeatures){const vector=new Array(141).fill(0);vector[0]=features.series_type.includes('UP')?1:0;vector[1]=features.series_type.includes('DOWN')?1:0;vector[2]=parseFloat(features.duration_sec);vector[3]=parseFloat(features.slope);vector[4]=parseFloat(features.total_volume);vector[5]=parseFloat(features.pivot_count);const retraceVector=calculateRetracementVector(features,prevFeatures);for(let i=0;i<retraceVector.length;i++){vector[6+i]=retraceVector[i];}
+return vector.map(v=>parseFloat(v.toFixed(6)));}
+function calculateRetracementVector(features,prevFeatures){const vector=new Array(135).fill(0);const MAX_SEQUENCES_TO_ENCODE=15;const NUM_CATEGORIES=9;if(features.series_type.startsWith('MAIN')){const internalPivotsWithEnds=[{time:features.start_time_timestamp,price:features.start_price,type:features.series_type.includes('UP')?'T':'P'},...features.internal_pivots,{time:features.end_time_timestamp,price:features.end_price,type:features.series_type.includes('UP')?'P':'T'}];let sequenceCount=0;if(internalPivotsWithEnds.length>=3){for(let i=2;i<internalPivotsWithEnds.length&&sequenceCount<MAX_SEQUENCES_TO_ENCODE;i++){const p0=internalPivotsWithEnds[i-2],p1=internalPivotsWithEnds[i-1],p2=internalPivotsWithEnds[i];if(p0.type!==p1.type&&p1.type!==p2.type){let swing_range=0,retracement_amount=0;if(p0.type==='T'){swing_range=p1.price-p0.price;retracement_amount=p1.price-p2.price;}else{swing_range=p0.price-p1.price;retracement_amount=p2.price-p1.price;}
+if(swing_range>0){const ratio=retracement_amount/swing_range;const oneHot=getOneHotVectorForRatio(ratio,NUM_CATEGORIES);oneHot.forEach((val,idx)=>{vector[sequenceCount*NUM_CATEGORIES+idx]=val;});sequenceCount++;}}}}}else if(features.series_type.startsWith('SUB')){if(prevFeatures&&prevFeatures.swing!==0){const ratio=Math.abs(features.swing)/Math.abs(prevFeatures.swing);const oneHot=getOneHotVectorForRatio(ratio,NUM_CATEGORIES);oneHot.forEach((val,idx)=>{vector[idx]=val;});}}
+return vector;}
+function getOneHotVectorForRatio(ratio,numCategories){const oneHotVector=new Array(numCategories).fill(0);const absRatioPercent=Math.abs(ratio*100);let categoryIndex=-1;if(absRatioPercent<35.5)categoryIndex=0;else if(absRatioPercent<58.5)categoryIndex=1;else if(absRatioPercent<74.5)categoryIndex=2;else if(absRatioPercent<91)categoryIndex=3;else if(absRatioPercent<100)categoryIndex=4;else if(absRatioPercent<125)categoryIndex=5;else if(absRatioPercent<200)categoryIndex=6;else if(absRatioPercent<=300)categoryIndex=7;else categoryIndex=8;if(categoryIndex!==-1){oneHotVector[categoryIndex]=1;}
+return oneHotVector;}
+function triggerAnalysis(timestamp){const targetContainer=activeAnalysisTimeframe==='1m'?chartContainerBottom:chartContainerTop;clearAnalysisShapes();const klinesData=allKlinesData[activeAnalysisTimeframe];const lookaround=parseInt(document.getElementById('lookaround-input').value,10);const tolerancePercent=parseFloat(document.getElementById('tolerance-input').value)||0;const toleranceFactors={lower:1-(tolerancePercent/100),upper:1+(tolerancePercent/100)};if(isNaN(lookaround)||lookaround<1)return;const{allPivots,closestPivots}=findPivots(timestamp,klinesData,lookaround);let shapes=[{name:'analysis_vline',type:'line',xref:'x',yref:'paper',x0:createDate(timestamp),x1:createDate(timestamp),y0:0,y1:1,line:{color:'rgba(255, 255, 255, 0.4)',width:1,dash:'longdash'}}];let annotations=[];if(closestPivots&&closestPivots.length>0){const analysisResult=analyzeChannelAndConnections(closestPivots,allPivots,klinesData,toleranceFactors,targetContainer);shapes.push(...analysisResult.shapes);annotations.push(...analysisResult.annotations);}
+drawAnalysisResults({shapes,annotations},targetContainer);}
+function drawAnalysisResults({shapes,annotations},targetContainer){const existingShapes=(targetContainer.layout.shapes||[]).filter(s=>!s.name?.startsWith('analysis_'));const existingAnnotations=(targetContainer.layout.annotations||[]).filter(a=>!a.name?.startsWith('analysis_')&&!a.name?.startsWith('auto_'));Plotly.relayout(targetContainer,{shapes:[...existingShapes,...shapes],annotations:[...existingAnnotations,...annotations]});}
+function clearAnalysisShapes(){[chartContainerTop,chartContainerBottom].forEach(container=>{if(container&&container.layout){const preservedShapes=(container.layout.shapes||[]).filter(s=>!s.name?.startsWith('analysis_')&&!s.name?.startsWith('retracement_')&&!s.name?.startsWith('multi_tf_'));const preservedAnnotations=(container.layout.annotations||[]).filter(a=>!a.name?.startsWith('analysis_')&&!a.name?.startsWith('retracement_')&&!a.name?.startsWith('multi_tf_')&&!a.name?.startsWith('auto_'));Plotly.relayout(container,{shapes:preservedShapes,annotations:preservedAnnotations});}});}
+function findPivots(timestamp,data,lookaround){const allPivots=[];if(!data||data.length<=lookaround*2)return{allPivots:[]};for(let i=lookaround;i<data.length-lookaround;i++){let isPeak=true,isTrough=true;const currentHigh=data[i][2],currentLow=data[i][3];for(let j=i-lookaround;j<=i+lookaround;j++){if(j===i)continue;if(data[j][2]>currentHigh)isPeak=false;if(data[j][3]<currentLow)isTrough=false;if(!isPeak&&!isTrough)break;}
+if(isPeak){allPivots.push({time:data[i][0],price:currentHigh,type:'P',distance:Math.abs(data[i][0]-timestamp)});}
+if(isTrough){allPivots.push({time:data[i][0],price:currentLow,type:'T',distance:Math.abs(data[i][0]-timestamp)});}}
+if(timestamp===0){allPivots.sort((a,b)=>a.time-b.time);return{allPivots};}
+const pivotsOnRight=allPivots.filter(pivot=>pivot.time>timestamp).sort((a,b)=>a.distance-b.distance);return{allPivots,closestPivots:pivotsOnRight.slice(0,20)};}
+function consolidatePivots(pivots){if(!pivots||pivots.length===0)return[];const consolidated=[];let i=0;while(i<pivots.length){const currentPivot=pivots[i];if(consolidated.length>0&&consolidated[consolidated.length-1].type===currentPivot.type){const lastConsolidated=consolidated[consolidated.length-1];if((currentPivot.type==='P'&&currentPivot.price>lastConsolidated.price)||(currentPivot.type==='T'&&currentPivot.price<lastConsolidated.price)){consolidated[consolidated.length-1]=currentPivot;}}else{consolidated.push(currentPivot);}
+i++;}
+return consolidated;}
+function analyzeChannelAndConnections(closestPivots,allPivots,klinesData,toleranceFactors,targetContainer){const initialShapes=[],initialAnnotations=[];const pivotsSortedByTime=[...closestPivots].sort((a,b)=>a.time-b.time);pivotsSortedByTime.forEach((pivot,index)=>{initialAnnotations.push({name:`analysis_label_${index}`,x:createDate(pivot.time),y:pivot.price,text:pivot.type,showarrow:true,arrowhead:4,ax:0,ay:pivot.type==='P'?-25:25,bgcolor:pivot.type==='P'?'rgba(255,100,0,0.7)':'rgba(0,100,255,0.7)',font:{color:'white'}});if(index>0){const startPivot=pivotsSortedByTime[index-1];initialShapes.push({name:`analysis_zigzag_${index-1}`,type:'line',layer:'below',xref:'x',yref:'y',x0:createDate(startPivot.time),y0:startPivot.price,x1:createDate(pivot.time),y1:pivot.price,line:{color:'rgba(255, 255, 255, 0.5)',width:1,dash:'dash'}});}});const upTrendResult=analyzeUpwardChannel(closestPivots,allPivots,klinesData,toleranceFactors,targetContainer);const downTrendResult=analyzeDownwardChannel(closestPivots,allPivots,klinesData,toleranceFactors,targetContainer);return{shapes:[...initialShapes,...upTrendResult.shapes,...downTrendResult.shapes],annotations:[...initialAnnotations,...upTrendResult.annotations,...downTrendResult.annotations]};}
+function analyzeUpwardChannel(closestPivots,allPivots,klinesData,toleranceFactors,targetContainer){const shapes=[],annotations=[];const troughs=closestPivots.filter(p=>p.type==='T').sort((a,b)=>a.time-b.time);if(troughs.length<2)return{shapes,annotations};const t1=troughs[0],t2=troughs[1];if(t2.price<t1.price){annotations.push({name:'analysis_label_uptrend_end_pre',x:createDate(t2.time),y:t2.price,text:'<b>상승 추세 종료 (T < T-1)</b>',showarrow:true,arrowhead:7,ax:0,ay:40,bgcolor:'darkred',bordercolor:'white',borderwidth:1,font:{color:'white',size:12}});return{shapes,annotations};}
+if(t2.time===t1.time)return{shapes,annotations};const slope=(t2.price-t1.price)/(t2.time-t1.time);const xRange=targetContainer._fullLayout.xaxis.range,xStartTimestamp=new Date(xRange[0]).getTime(),xEndTimestamp=new Date(xRange[1]).getTime()+(24*60*60*1000);shapes.push({name:'analysis_trendline_up',type:'line',layer:'below',xref:'x',yref:'y',x0:createDate(xStartTimestamp),y0:slope*(xStartTimestamp-t1.time)+t1.price,x1:createDate(xEndTimestamp),y1:slope*(xEndTimestamp-t1.time)+t1.price,line:{color:'cyan',width:1.5,dash:'dot'}});const firstP=closestPivots.filter(p=>p.type==='P'&&p.time>t1.time).sort((a,b)=>a.time-b.time)[0];if(!firstP)return{shapes,annotations};const breakthroughP=allPivots.filter(p=>p.type==='P'&&p.time>firstP.time&&p.price>firstP.price).sort((a,b)=>a.time-b.time)[0];if(!breakthroughP)return{shapes,annotations};annotations.push({name:`analysis_label_p_minus`,x:createDate(breakthroughP.time),y:breakthroughP.price,text:'P-',showarrow:true,arrowhead:4,ax:0,ay:-35,bgcolor:'rgba(255, 20, 147, 0.9)',font:{color:'white',size:14}});shapes.push({name:'analysis_parallel_line_up',type:'line',layer:'below',xref:'x',yref:'y',x0:createDate(xStartTimestamp),y0:slope*(xStartTimestamp-breakthroughP.time)+breakthroughP.price,x1:createDate(xEndTimestamp),y1:slope*(xEndTimestamp-breakthroughP.time)+breakthroughP.price,line:{color:'cyan',width:1.5,dash:'dot'}});let lowerBreakoutCandle=null,upperBreakoutCandle=null;const startIndex=klinesData.findIndex(k=>k[0]>t2.time);if(startIndex!==-1){for(let i=startIndex;i<klinesData.length;i++){const candle=klinesData[i],candleTime=candle[0],candleHigh=candle[2],candleLow=candle[3];if(!lowerBreakoutCandle){const lowerBoundary=slope*(candleTime-t1.time)+t1.price;if(candleLow<(lowerBoundary*toleranceFactors.lower))lowerBreakoutCandle=candle;}
+if(!upperBreakoutCandle&&candleTime>breakthroughP.time){const upperBoundary=slope*(candleTime-breakthroughP.time)+breakthroughP.price;if(candleHigh>(upperBoundary*toleranceFactors.upper))upperBreakoutCandle=candle;}
+if(lowerBreakoutCandle&&(upperBreakoutCandle||candleTime<=breakthroughP.time))break;if(lowerBreakoutCandle&&upperBreakoutCandle)break;}}
+if(lowerBreakoutCandle)annotations.push({name:'analysis_label_break_down_upchannel',x:createDate(lowerBreakoutCandle[0]),y:lowerBreakoutCandle[3],text:'<b>하단 이탈</b>',showarrow:true,arrowhead:7,ax:0,ay:40,bgcolor:'rgba(255, 140, 0, 0.8)',bordercolor:'white',borderwidth:1,font:{color:'white',size:12}});if(upperBreakoutCandle)annotations.push({name:'analysis_label_break_up_upchannel',x:createDate(upperBreakoutCandle[0]),y:upperBreakoutCandle[2],text:'<b>상단 돌파</b>',showarrow:true,arrowhead:7,ax:0,ay:-40,bgcolor:'rgba(0, 150, 255, 0.8)',bordercolor:'white',borderwidth:1,font:{color:'white',size:12}});const firstBreakoutTime=[lowerBreakoutCandle,upperBreakoutCandle].filter(Boolean).reduce((min,c)=>Math.min(min,c[0]),Infinity);const channelEndTime=(firstBreakoutTime===Infinity)?klinesData[klinesData.length-1][0]:firstBreakoutTime;const peaksInChannel=allPivots.filter(p=>p.type==='P'&&p.time>=t1.time&&p.time<channelEndTime);if(peaksInChannel.length>0){const highestPeakInChannel=peaksInChannel.reduce((max,p)=>p.price>max.price?p:max);shapes.push({name:'analysis_connecting_line_up',type:'line',layer:'below',xref:'x',yref:'y',x0:createDate(t1.time),y0:t1.price,x1:createDate(highestPeakInChannel.time),y1:highestPeakInChannel.price,line:{color:'yellow',width:2}});}
+return{shapes,annotations};}
+function analyzeDownwardChannel(closestPivots,allPivots,klinesData,toleranceFactors,targetContainer){const shapes=[],annotations=[];const peaks=closestPivots.filter(p=>p.type==='P').sort((a,b)=>a.time-b.time);if(peaks.length<2)return{shapes,annotations};const p1=peaks[0],p2=peaks[1];if(p2.price>p1.price){annotations.push({name:'analysis_label_downtrend_end_pre',x:createDate(p2.time),y:p2.price,text:'<b>하락 추세 종료 (P > P-1)</b>',showarrow:true,arrowhead:7,ax:0,ay:-40,bgcolor:'darkgreen',bordercolor:'white',borderwidth:1,font:{color:'white',size:12}});return{shapes,annotations};}
+if(p2.time===p1.time)return{shapes,annotations};const slope=(p2.price-p1.price)/(p2.time-p1.time);const xRange=targetContainer._fullLayout.xaxis.range,xStartTimestamp=new Date(xRange[0]).getTime(),xEndTimestamp=new Date(xRange[1]).getTime()+(24*60*60*1000);shapes.push({name:'analysis_trendline_down',type:'line',layer:'below',xref:'x',yref:'y',x0:createDate(xStartTimestamp),y0:slope*(xStartTimestamp-p1.time)+p1.price,x1:createDate(xEndTimestamp),y1:slope*(xEndTimestamp-p1.time)+p1.price,line:{color:'magenta',width:1.5,dash:'dot'}});const firstT=closestPivots.filter(p=>p.type==='T'&&p.time>p1.time).sort((a,b)=>a.time-b.time)[0];if(!firstT)return{shapes,annotations};const breakthroughT=allPivots.filter(p=>p.type==='T'&&p.time>firstT.time&&p.price<firstT.price).sort((a,b)=>a.time-b.time)[0];if(!breakthroughT)return{shapes,annotations};annotations.push({name:`analysis_label_t_plus`,x:createDate(breakthroughT.time),y:breakthroughT.price,text:'T+',showarrow:true,arrowhead:4,ax:0,ay:35,bgcolor:'rgba(20, 255, 147, 0.9)',font:{color:'white',size:14}});shapes.push({name:'analysis_parallel_line_down',type:'line',layer:'below',xref:'x',yref:'y',x0:createDate(xStartTimestamp),y0:slope*(xStartTimestamp-breakthroughT.time)+breakthroughT.price,x1:createDate(xEndTimestamp),y1:slope*(xEndTimestamp-breakthroughT.time)+breakthroughT.price,line:{color:'magenta',width:1.5,dash:'dot'}});let upperBreakoutCandle=null,lowerBreakoutCandle=null;const startIndex=klinesData.findIndex(k=>k[0]>p2.time);if(startIndex!==-1){for(let i=startIndex;i<klinesData.length;i++){const candle=klinesData[i],candleTime=candle[0],candleHigh=candle[2],candleLow=candle[3];if(!upperBreakoutCandle){const upperBoundary=slope*(candleTime-p1.time)+p1.price;if(candleHigh>(upperBoundary*toleranceFactors.upper))upperBreakoutCandle=candle;}
+if(!lowerBreakoutCandle&&candleTime>breakthroughT.time){const lowerBoundary=slope*(candleTime-breakthroughT.time)+breakthroughT.price;if(candleLow<(lowerBoundary*toleranceFactors.lower))lowerBreakoutCandle=candle;}
+if(upperBreakoutCandle&&(lowerBreakoutCandle||candleTime<=breakthroughT.time))break;if(upperBreakoutCandle&&lowerBreakoutCandle)break;}}
+if(upperBreakoutCandle)annotations.push({name:'analysis_label_break_up_downchannel',x:createDate(upperBreakoutCandle[0]),y:upperBreakoutCandle[2],text:'<b>상단 돌파</b>',showarrow:true,arrowhead:7,ax:0,ay:-40,bgcolor:'rgba(0, 150, 255, 0.8)',bordercolor:'white',borderwidth:1,font:{color:'white',size:12}});if(lowerBreakoutCandle)annotations.push({name:'analysis_label_break_down_downchannel',x:createDate(lowerBreakoutCandle[0]),y:lowerBreakoutCandle[3],text:'<b>하단 이탈</b>',showarrow:true,arrowhead:7,ax:0,ay:40,bgcolor:'rgba(255, 140, 0, 0.8)',bordercolor:'white',borderwidth:1,font:{color:'white',size:12}});const firstBreakoutTime=[upperBreakoutCandle,lowerBreakoutCandle].filter(Boolean).reduce((min,c)=>Math.min(min,c[0]),Infinity);const channelEndTime=(firstBreakoutTime===Infinity)?klinesData[klinesData.length-1][0]:firstBreakoutTime;const troughsInChannel=allPivots.filter(p=>p.type==='T'&&p.time>=p1.time&&p.time<channelEndTime);if(troughsInChannel.length>0){const lowestTroughInChannel=troughsInChannel.reduce((min,p)=>p.price<min.price?p:min);shapes.push({name:'analysis_connecting_line_down',type:'line',layer:'below',xref:'x',yref:'y',x0:createDate(p1.time),y0:p1.price,x1:createDate(lowestTroughInChannel.time),y1:lowestTroughInChannel.price,line:{color:'yellow',width:2}});}
+return{shapes,annotations};}
 
 function performAutoLabeling() {
     if (!chartInitialized) return;
     const lookaround = parseInt(document.getElementById('lookaround-input').value, 10);
     if (isNaN(lookaround) || lookaround < 1) return;
-    const { allPivots } = findPivots(0, klinesData, lookaround);
-    const newAutoAnnotations = allPivots.map((pivot, i) => ({
+
+    const klinesData15m = allKlinesData['15m'];
+    const { allPivots: allPivots15m } = findPivots(0, klinesData15m, lookaround );
+    const consolidated15m = consolidatePivots(allPivots15m);
+    const annotations15m = consolidated15m.map((pivot, i) => ({
         name: `auto_${pivot.type}_${i}`, x: createDate(pivot.time), y: pivot.price,
-        text: pivot.type, showarrow: true, arrowhead: 4, ax: 0, ay: pivot.type === 'P' ? -20 : 20,
-        font: { size: 10, color: pivot.type === 'P' ? 'orange' : 'skyblue' }, bgcolor: 'rgba(0,0,0,0.6)'
+        text: pivot.type, showarrow: true, arrowhead: 4, ax: 0,
+        ay: pivot.type === 'P' ? -20 : 20,
+        font: { size: 10, color: pivot.type === 'P' ? 'orange' : 'skyblue' },
+        bgcolor: 'rgba(0,0,0,0.6)'
     }));
-    const manualAnnotations = (chartContainer._fullLayout.annotations || []).filter(a => !a.name?.startsWith('auto_') && !a.name?.startsWith('analysis_'));
-    const analysisAnnotations = (chartContainer._fullLayout.annotations || []).filter(a => a.name?.startsWith('analysis_'));
-    Plotly.relayout(chartContainer, { annotations: [...manualAnnotations, ...analysisAnnotations, ...newAutoAnnotations] });
+    const existingAnnotationsTop = (chartContainerTop.layout.annotations || []).filter(a => !a.name?.startsWith('auto_'));
+    Plotly.relayout(chartContainerTop, { annotations: [...existingAnnotationsTop, ...annotations15m] });
+
+    const klinesData1m = allKlinesData['1m'];
+    const { allPivots: allPivots1m } = findPivots(0, klinesData1m, lookaround);
+    const consolidated1m = consolidatePivots(allPivots1m);
+    const annotations1m = consolidated1m.map((pivot, i) => ({
+        name: `auto_${pivot.type}_${i}`, x: createDate(pivot.time), y: pivot.price,
+        text: pivot.type, showarrow: true, arrowhead: 4, ax: 0,
+        ay: pivot.type === 'P' ? -20 : 20,
+        font: { size: 10, color: pivot.type === 'P' ? 'orange' : 'skyblue' },
+        bgcolor: 'rgba(0,0,0,0.6)'
+    }));
+    const existingAnnotationsBottom = (chartContainerBottom.layout.annotations || []).filter(a => !a.name?.startsWith('auto_'));
+    Plotly.relayout(chartContainerBottom, { annotations: [...existingAnnotationsBottom, ...annotations1m] });
+
+    console.log(`자동 라벨링 완료: 15m 차트 (${annotations15m.length}개), 1m 차트 (${annotations1m.length}개)`);
 }
 
 // ===================================================================================
-// 사용자 상호작용 (이벤트 핸들러)
+// 유틸리티 및 이벤트 핸들러
 // ===================================================================================
-function handleDrawingToolToggle(toolNameToToggle) {
-    const turningOff = toolNameToToggle === 'box' && isBoxDrawingEnabled;
-    isBoxDrawingEnabled = (toolNameToToggle === 'box' && !isBoxDrawingEnabled);
-    const buttonText = isFullAnalysisDone ? '💎 시리즈 선택' : '📦 Box On';
-    toggleBoxDrawingButton.textContent = isBoxDrawingEnabled ? '✋ 선택 해제' : buttonText;
-    if (isBoxDrawingEnabled) { toggleBoxDrawingButton.classList.add('active'); }
-    else { toggleBoxDrawingButton.classList.remove('active'); }
+function handleDrawingToolToggle(toolToToggle) {
+    const boxButton = document.getElementById('toggle-box-drawing-button');
+    const measureButton = document.getElementById('measure-tool-btn');
+    
+    const wasBoxEnabled = isBoxDrawingEnabled;
+    const wasMeasureEnabled = isMeasureModeEnabled;
+
+    isBoxDrawingEnabled = false;
+    isMeasureModeEnabled = false;
+    measureStartPoint = null;
     currentBoxFirstPoint = null;
-    if (turningOff && selectionBox) {
-        drawnBoxes = drawnBoxes.filter(box => box.id !== selectionBox.id);
-        selectionBox = null; selectedSeries = [];
-        Plotly.relayout(chartContainer, { shapes: getCurrentlyVisibleShapes() });
-        console.log("선택이 해제되었습니다.");
+    clearMeasureShapes();
+
+    if (toolToToggle === 'box' && !wasBoxEnabled) {
+        isBoxDrawingEnabled = true;
+    } else if (toolToToggle === 'measure' && !wasMeasureEnabled) {
+        isMeasureModeEnabled = true;
     }
+
+    const boxButtonText = isFullAnalysisDone ? '💎 시리즈 선택' : '📦 Box';
+    boxButton.textContent = boxButtonText;
+    boxButton.classList.toggle('active', isBoxDrawingEnabled);
+    measureButton.classList.toggle('active', isMeasureModeEnabled);
 }
 
-function handleChartClick(event) {
-    if (!chartInitialized || contextMenu.style.display === 'block' || event.target.closest('.select-outline')) return;
-    const clickData = getClickCoordinates(event);
+function handleChartClick(event){
+    const clickedChartContainer = event.target.closest('#chart-container-top') || event.target.closest('#chart-container-bottom');
+    if (!clickedChartContainer || clickedChartContainer.style.display === 'none') return;
+    if (!chartInitialized || event.target.closest('.select-outline')) return;
+    
+    const clickData = getClickCoordinates(event, clickedChartContainer);
     if (!clickData) return;
 
+    if (isMeasureModeEnabled) {
+        if (!measureStartPoint) {
+            clearMeasureShapes();
+            measureStartPoint = { ...clickData, chart: clickedChartContainer };
+        } else {
+            measureStartPoint = null; 
+        }
+        return;
+    }
+    
     if (isBoxDrawingEnabled && event.button === 0) {
-        if (!currentBoxFirstPoint) { currentBoxFirstPoint = clickData; }
-        else {
-            if (selectionBox) {
+        if(!currentBoxFirstPoint){
+            currentBoxFirstPoint = clickData;
+        } else {
+            if(selectionBox){
                 drawnBoxes = drawnBoxes.filter(b => b.id !== selectionBox.id);
-                selectionBox = null; selectedSeries = [];
+                selectionBox = null;
+                selectedSeries = [];
             }
             const boxId = isFullAnalysisDone ? 'series_selection_box_' + Date.now() : BOX_SHAPE_NAME_PREFIX + Date.now();
             const newBoxShape = {
-                id: boxId, type: 'rect', layer: 'below', editable: true, xref: 'x', yref: 'y',
+                id: boxId, name: boxId, type: 'rect', layer: 'below', xref: 'x', yref: 'y',
                 x0: createDate(Math.min(currentBoxFirstPoint.time.getTime(), clickData.time.getTime())),
                 y0: Math.min(currentBoxFirstPoint.price, clickData.price),
                 x1: createDate(Math.max(currentBoxFirstPoint.time.getTime(), clickData.time.getTime())),
@@ -1029,173 +798,199 @@ function handleChartClick(event) {
                 fillcolor: 'rgba(0, 123, 255, 0.2)',
                 line: { color: 'rgba(0, 123, 255, 0.7)', width: 1 },
             };
-
             if (isFullAnalysisDone) {
                 newBoxShape.fillcolor = 'rgba(255, 0, 0, 0.1)';
                 newBoxShape.line = { color: 'rgba(255, 0, 0, 0.7)', width: 1.5, dash: 'dash' };
                 selectionBox = newBoxShape;
-
-                // '전체 분석'으로 생성된 모든 시리즈(메인/서브) shape을 가져온다.
-                const allAnalyzedShapes = (chartContainer.layout.shapes || []).filter(s => s.name?.startsWith('series_'));
-
+                const allAnalyzedShapes = (clickedChartContainer.layout.shapes || []).filter(s => s.name?.startsWith('series_'));
                 const selectionX0 = new Date(selectionBox.x0).getTime(), selectionX1 = new Date(selectionBox.x1).getTime();
-                
-                selectedSeries = allAnalyzedShapes.map(s => ({
-                    type: s.name.includes('MAIN') ? (s.name.includes('UP') ? 'MAIN_UP' : 'MAIN_DOWN') : (new Date(s.y1) > new Date(s.y0) ? 'SUB_UP' : 'SUB_DOWN'),
-                    shape: s
-                })).filter(s_obj => {
-                     const shapeX0 = new Date(s_obj.shape.x0).getTime(), shapeX1 = new Date(s_obj.shape.x1).getTime();
-                     return Math.max(selectionX0, shapeX0) <= Math.min(selectionX1, shapeX1);
+                selectedSeries = allAnalyzedShapes.map(s => {
+                    const type = s.name.includes('MAIN') ? (s.line.color.includes('255, 255, 0') ? (s.y1 > s.y0 ? 'MAIN_UP' : 'MAIN_DOWN') : 'SUB') : (s.y1 > s.y0 ? 'SUB_UP' : 'SUB_DOWN');
+                    return { type, shape: s };
+                }).filter(s_obj => {
+                    const shapeX0 = new Date(s_obj.shape.x0).getTime(), shapeX1 = new Date(s_obj.shape.x1).getTime();
+                    return Math.max(selectionX0, shapeX0) <= Math.min(selectionX1, shapeX1);
                 });
-                
-                // 선택된 시리즈들에 대해 다시 분석 및 텐서화 수행
                 const lookaroundValue = parseInt(document.getElementById('lookaround-input').value, 10);
+                const klinesData = allKlinesData[clickedChartContainer === chartContainerTop ? '15m' : '1m'];
                 const allPivots = consolidatePivots(findPivots(0, klinesData, lookaroundValue).allPivots);
                 analyzeAndVectorizeAllSeries(selectedSeries, allPivots);
-
             } else {
-                 drawnBoxes.push(newBoxShape);
+                drawnBoxes.push(newBoxShape);
             }
-            
             currentBoxFirstPoint = null;
-            Plotly.relayout(chartContainer, { shapes: getCurrentlyVisibleShapes() });
+            Plotly.relayout(clickedChartContainer, { shapes: getCurrentlyVisibleShapes(clickedChartContainer) });
         }
     } else {
         event.preventDefault();
         event.stopImmediatePropagation();
+        activeAnalysisTimeframe = clickedChartContainer === chartContainerTop ? '15m' : '1m';
+        updateActiveTimeframeButton(activeAnalysisTimeframe);
+        updateTopBar();
         triggerAnalysis(clickData.time.getTime());
     }
 }
 
-function triggerAnalysisAtCenter() {
-    if (!chartInitialized) return;
-    const currentXRange = chartContainer._fullLayout.xaxis.range;
-    const centerX = new Date(currentXRange[0]).getTime() + (new Date(currentXRange[1]).getTime() - new Date(currentXRange[0]).getTime()) / 2;
-    triggerAnalysis(centerX);
-}
-
-function isPointInShape(point, shape) {
-    if (!point || !shape || shape.type !== 'rect') return false;
-    const t = point.time.getTime(), p = point.price;
-    const x0 = new Date(shape.x0).getTime(), x1 = new Date(shape.x1).getTime();
-    return t >= Math.min(x0, x1) && t <= Math.max(x0, x1) && p >= Math.min(shape.y0, shape.y1) && p <= Math.max(shape.y0, shape.y1);
-}
-
-function handleContextMenu(event) {
-    event.preventDefault();
-    if (!chartInitialized) return;
-    const clickData = getClickCoordinates(event);
-    deleteBoxButton.style.display = 'none';
-    contextMenuTargetInfo = null;
-    if (clickData) {
-        const clickedBox = drawnBoxes.find(box => isPointInShape(clickData, box));
-        if (clickedBox && clickedBox.id !== selectionBox?.id) {
-            deleteBoxButton.style.display = 'block';
-            contextMenuTargetInfo = { type: 'box', id: clickedBox.id };
-            contextMenu.style.display = 'block';
-            contextMenu.style.left = `${event.clientX}px`;
-            contextMenu.style.top = `${event.clientY}px`;
-            document.addEventListener('click', () => contextMenu.style.display = 'none', { once: true });
-        }
-    }
-}
-
-function handleDeleteBox() {
-    if (contextMenuTargetInfo?.type === 'box' && contextMenuTargetInfo.id) {
-        drawnBoxes = drawnBoxes.filter(box => box.id !== contextMenuTargetInfo.id);
-        Plotly.relayout(chartContainer, { shapes: getCurrentlyVisibleShapes() });
-    }
-    contextMenu.style.display = 'none';
-}
+function triggerAnalysisAtCenter(){if(!chartInitialized)return;const targetContainer=activeAnalysisTimeframe==='1m'?chartContainerBottom:chartContainerTop;const currentXRange=targetContainer._fullLayout.xaxis.range;const centerX=new Date(currentXRange[0]).getTime()+(new Date(currentXRange[1]).getTime()-new Date(currentXRange[0]).getTime())/2;triggerAnalysis(centerX);}
+function isPointInShape(point,shape){if(!point||!shape||shape.type!=='rect')return false;const t=point.time.getTime(),p=point.price;const x0=new Date(shape.x0).getTime(),x1=new Date(shape.x1).getTime();return t>=Math.min(x0,x1)&&t<=Math.max(x0,x1)&&p>=Math.min(shape.y0,shape.y1)&&p<=Math.max(shape.y0,shape.y1);}
+function handleContextMenu(event){event.preventDefault();const clickedChartContainer=event.target.closest('#chart-container-top')||event.target.closest('#chart-container-bottom');if(!clickedChartContainer||!chartInitialized)return;const clickData=getClickCoordinates(event,clickedChartContainer);contextMenu.style.display='none';deleteBoxButton.style.display='none';contextMenuTargetInfo=null;if(clickData){const clickedBox=drawnBoxes.find(box=>isPointInShape(clickData,box));if(clickedBox&&(!selectionBox||clickedBox.id!==selectionBox.id)){deleteBoxButton.style.display='block';contextMenuTargetInfo={type:'box',id:clickedBox.id,chart:clickedChartContainer};contextMenu.style.display='block';contextMenu.style.left=`${event.clientX}px`;contextMenu.style.top=`${event.clientY}px`;document.addEventListener('click',()=>contextMenu.style.display='none',{once:true});}}}
+function handleDeleteBox(){if(contextMenuTargetInfo?.type==='box'&&contextMenuTargetInfo.id){drawnBoxes=drawnBoxes.filter(box=>box.id!==contextMenuTargetInfo.id);const targetChart=contextMenuTargetInfo.chart;Plotly.relayout(targetChart,{shapes:getCurrentlyVisibleShapes(targetChart)});}
+contextMenu.style.display='none';}
 
 function handleMouseMove(e) {
     if (!chartInitialized) return;
-    const coords = getClickCoordinates(e);
+    const eventChartContainer = e.target.closest('#chart-container-top') || e.target.closest('#chart-container-bottom');
+    if (!eventChartContainer) return handleMouseLeave();
+    
+    const coords = getClickCoordinates(e, eventChartContainer);
     if (!coords) return handleMouseLeave();
-    const analysisShapes = (chartContainer._fullLayout.shapes || []).filter(s => s.name?.startsWith('analysis_') || s.name?.startsWith('series_'));
-    const analysisAnnotations = (chartContainer._fullLayout.annotations || []).filter(a => a.name?.startsWith('analysis_'));
-    const autoAnnotations = (chartContainer._fullLayout.annotations || []).filter(a => a.name?.startsWith('auto_'));
 
-    const crosshairShapes = [
-        { name: "crosshair_v", type: "line", visible: true, line: CROSSHAIR_LINE_STYLE, yref: "paper", y0: 0, y1: 1, x0: coords.time, x1: coords.time },
-        { name: "crosshair_h", type: "line", visible: true, line: CROSSHAIR_LINE_STYLE, xref: "paper", x0: 0, x1: 1, y0: coords.price, y1: coords.price }
-    ];
-    const crosshairAnnotations = [
-        { x: 1.01, xref: "paper", y: coords.price, yref: "y", text: coords.price.toFixed(2), showarrow: false, font: { color: "black" }, bgcolor: "grey", borderpad: 2 },
-        { x: coords.time, xref: "x", y: 0, yref: "paper", text: coords.time.toLocaleTimeString([], { hour12: false }), showarrow: false, font: { color: "black" }, bgcolor: "grey", borderpad: 2, yshift: -20 }
-    ];
-    Plotly.relayout(chartContainer, { shapes: [...crosshairShapes, ...analysisShapes, ...drawnBoxes], annotations: [...crosshairAnnotations, ...analysisAnnotations, ...autoAnnotations] });
+    if (isMeasureModeEnabled && measureStartPoint) {
+        clearMeasureShapes();
+        
+        const start = measureStartPoint;
+        const end = coords;
+        
+        const priceDiff = end.price - start.price;
+        const percentChange = (priceDiff / start.price) * 100;
+        const timeDiff = end.time.getTime() - start.time.getTime();
+        
+        const startTime = Math.min(start.time.getTime(), end.time.getTime());
+        const endTime = Math.max(start.time.getTime(), end.time.getTime());
+        const klinesData = allKlinesData[activeAnalysisTimeframe];
+        const barCount = klinesData.filter(k => k[0] >= startTime && k[0] <= endTime).length;
+
+        const infoText = `
+            ${priceDiff.toFixed(2)} (${percentChange.toFixed(2)}%)<br>
+            ${barCount} bars, ${formatTimeDuration(timeDiff)}
+        `;
+        
+        const lineShape = {
+            name: 'measure_line', type: 'line', layer: 'above',
+            xref: 'x', yref: 'y',
+            x0: start.time, y0: start.price, x1: end.time, y1: end.price,
+            line: { color: 'rgba(255, 255, 255, 0.7)', width: 1.5, dash: 'dash' }
+        };
+        
+        const annotation = {
+            name: 'measure_info_text', x: end.time, y: end.price,
+            text: infoText, showarrow: false, font: { color: 'white', size: 12 },
+            align: end.time > start.time ? 'left' : 'right',
+            xanchor: end.time > start.time ? 'left' : 'right',
+            yanchor: 'middle', ax: 10, bgcolor: 'rgba(0,0,0,0.7)', borderpad: 4
+        };
+
+        [chartContainerTop, chartContainerBottom].forEach(chartDiv => {
+             const existingShapes = (chartDiv.layout.shapes || []).filter(s => !s.name?.startsWith("measure_"));
+             const existingAnnotations = (chartDiv.layout.annotations || []).filter(a => !a.name?.startsWith("measure_"));
+             Plotly.relayout(chartDiv, {
+                 shapes: [...existingShapes, lineShape],
+                 annotations: [...existingAnnotations, annotation]
+             });
+        });
+        return; // 측정 중에는 십자선 표시 안 함
+    }
+
+    [chartContainerTop, chartContainerBottom].forEach(chartDiv => {
+        if (!chartDiv || !chartDiv.layout) return;
+        const existingShapes = (chartDiv.layout.shapes || []).filter(s => !s.name?.startsWith("crosshair"));
+        const existingAnnotations = (chartDiv.layout.annotations || []).filter(a => !a.name?.startsWith("crosshair"));
+        const crosshairShapes = [
+            { name: "crosshair_v", type: "line", visible: true, line: CROSSHAIR_LINE_STYLE, yref: "paper", y0: 0, y1: 1, x0: coords.time.getTime(), x1: coords.time.getTime() },
+            { name: "crosshair_h", type: "line", visible: true, line: CROSSHAIR_LINE_STYLE, xref: "paper", x0: 0, x1: 1, y0: coords.price, y1: coords.price }
+        ];
+        const priceAnnotation = { name: "crosshair_price_label", x: 1.01, xref: "paper", y: coords.price, yref: "y", text: coords.price.toFixed(2), showarrow: false, font: { color: "black", size: 10 }, bgcolor: "grey", borderpad: 2, align: 'left' };
+        const timeAnnotation = { name: "crosshair_time_label", x: coords.time, xref: "x", y: 1.01, yref: "paper", text: coords.time.toLocaleString([], { year: '2-digit', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }), showarrow: false, font: { color: "black", size: 10 }, bgcolor: "grey", borderpad: 2 };
+        Plotly.relayout(chartDiv, { shapes: [...existingShapes, ...crosshairShapes], annotations: [...existingAnnotations, priceAnnotation, timeAnnotation] });
+    });
 }
 
-function handleMouseLeave() {
-    if (!chartInitialized) return;
-    const analysisShapes = (chartContainer._fullLayout.shapes || []).filter(s => s.name?.startsWith('analysis_') || s.name?.startsWith('series_'));
-    const analysisAnnotations = (chartContainer._fullLayout.annotations || []).filter(a => a.name?.startsWith('analysis_'));
-    const autoAnnotations = (chartContainer._fullLayout.annotations || []).filter(a => a.name?.startsWith('auto_'));
-    Plotly.relayout(chartContainer, { shapes: [...getHiddenCrosshairShapes(), ...analysisShapes, ...drawnBoxes], annotations: [...analysisAnnotations, ...autoAnnotations] });
+function handleMouseLeave(){if(!chartInitialized)return;[chartContainerTop,chartContainerBottom].forEach(chartDiv=>{if(!chartDiv||!chartDiv.layout)return;const preservedShapes=(chartDiv.layout.shapes||[]).filter(s=>!s.name?.startsWith("crosshair"));const preservedAnnotations=(chartDiv.layout.annotations||[]).filter(a=>!a.name?.startsWith("crosshair"));Plotly.relayout(chartDiv,{shapes:preservedShapes,annotations:preservedAnnotations});});}
+function handleKeyDown(event){if(document.activeElement.tagName==='INPUT')return;const key=event.key.toLowerCase();let preventDefault=true;if(key==='c')triggerAnalysisAtCenter();else if(key==='+'||key==='=')zoomTime(true);else if(key==='-'||key==='_')zoomTime(false);else if(key==='arrowup'||key==='w')panPrice(0.05);else if(key==='arrowdown'||key==='s')panPrice(-0.05);else if(key==='arrowleft'||key==='a')panTime(-PAN_FRACTION);else if(key==='arrowright'||key==='d')panTime(PAN_FRACTION);else preventDefault=false;if(preventDefault)event.preventDefault();}
+function handleWheelZoom(event){if(!chartInitialized)return;event.preventDefault();zoomTime(event.deltaY>0);}
+function getClickCoordinates(e,targetContainer){const fullLayout=targetContainer._fullLayout;if(!fullLayout?.xaxis?._length)return null;const bRect=targetContainer.getBoundingClientRect();const x=e.clientX-bRect.left;const y=e.clientY-bRect.top;const xa=fullLayout.xaxis;const ya=fullLayout.yaxis;const dataX=xa.p2d(x-fullLayout.margin.l);const dataY=ya.p2d(y-fullLayout.margin.t);if(dataX<xa.range[0]||dataX>xa.range[1]||dataY<ya.range[0]||dataY>ya.range[1]){return null;}
+return{time:createDate(dataX),price:dataY};}
+function getCurrentlyVisibleShapes(targetContainer){const analysisAndSeriesShapes=(targetContainer.layout.shapes||[]).filter(s=>!s.name?.startsWith(BOX_SHAPE_NAME_PREFIX)&&s.id!==selectionBox?.id);const allShapes=[...drawnBoxes,...analysisAndSeriesShapes];if(selectionBox){allShapes.push(selectionBox);}
+return allShapes;}
+function checkForPastDataFetch(newRange){if(fetchingMoreData||isInTimeTravelMode)return;const viewportStartTime=new Date(newRange[0]).getTime();const oldestTime15m=allKlinesData['15m'].length>0?allKlinesData['15m'][0][0]:Infinity;if((viewportStartTime-oldestTime15m)<=(candleIntervalMillis['15m']*50)){fetchMoreHistoricalData(chartContainerTop);}
+const oldestTime1m=allKlinesData['1m'].length>0?allKlinesData['1m'][0][0]:Infinity;if((viewportStartTime-oldestTime1m)<=(candleIntervalMillis['1m']*50)){fetchMoreHistoricalData(chartContainerBottom);}}
+function updateXAxisRangeForAllCharts(newRange){if(isRelayouting||!chartInitialized)return;isRelayouting=true;Promise.all([Plotly.relayout(chartContainerTop,{'xaxis.range':newRange}),Plotly.relayout(chartContainerBottom,{'xaxis.range':newRange})]).finally(()=>{isRelayouting=false;});}
+function zoomTime(zoomIn){if(!chartInitialized)return;if(isXAutoRangeEnabled){isXAutoRangeEnabled=false;xAutoRangeToggle.checked=false;}
+const range=chartContainerTop._fullLayout.xaxis.range.map(d=>new Date(d).getTime());const change=(range[1]-range[0])*X_AXIS_ZOOM_FACTOR*(zoomIn?-0.5:0.5);const newRange=[createDate(range[0]+change),createDate(range[1]-change)];updateXAxisRangeForAllCharts(newRange);}
+function panTime(fraction){if(!chartInitialized)return;if(isXAutoRangeEnabled){isXAutoRangeEnabled=false;xAutoRangeToggle.checked=false;}
+const range=chartContainerTop._fullLayout.xaxis.range.map(d=>new Date(d).getTime());const move=(range[1]-range[0])*fraction;const newRange=[createDate(range[0]+move),createDate(range[1]+move)];updateXAxisRangeForAllCharts(newRange);if(fraction<0){checkForPastDataFetch(newRange);}}
+function adjustPriceScale(zoomIn){if(!chartInitialized)return;if(isYAutoRangeEnabled){isYAutoRangeEnabled=false;yAutoRangeToggle.checked=false;}
+const rangeTop=chartContainerTop._fullLayout.yaxis.range;const rangeBottom=chartContainerBottom._fullLayout.yaxis.range;const changeTop=(rangeTop[1]-rangeTop[0])*Y_AXIS_ZOOM_FACTOR*(zoomIn?-0.5:0.5);const changeBottom=(rangeBottom[1]-rangeBottom[0])*Y_AXIS_ZOOM_FACTOR*(zoomIn?-0.5:0.5);Plotly.relayout(chartContainerTop,{'yaxis.range':[rangeTop[0]-changeTop,rangeTop[1]+changeTop]});Plotly.relayout(chartContainerBottom,{'yaxis.range':[rangeBottom[0]-changeBottom,rangeBottom[1]+changeBottom]});}
+function panPrice(fraction){if(!chartInitialized)return;if(isYAutoRangeEnabled){isYAutoRangeEnabled=false;yAutoRangeToggle.checked=false;}
+const rangeTop=chartContainerTop._fullLayout.yaxis.range;const rangeBottom=chartContainerBottom._fullLayout.yaxis.range;const moveTop=(rangeTop[1]-rangeTop[0])*fraction;const moveBottom=(rangeBottom[1]-rangeBottom[0])*fraction;Plotly.relayout(chartContainerTop,{'yaxis.range':[rangeTop[0]+moveTop,rangeTop[1]+moveTop]});Plotly.relayout(chartContainerBottom,{'yaxis.range':[rangeBottom[0]+moveBottom,rangeBottom[1]+moveBottom]});}
+function handleCalendarIconClick(){timeTravelPickerArea.style.display=timeTravelPickerArea.style.display==='none'?'flex':'none';if(timeTravelPickerArea.style.display==='flex'){datetimePicker.value=new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16);}}
+function handleLoadPastDataClick(){const datetimeString=datetimePicker.value;if(!datetimeString){alert("시간을 선택해주세요.");return;}
+const selectedTime=new Date(datetimeString).getTime();console.log(`시간 여행 모드 시작: ${new Date(selectedTime).toLocaleString()}`);initializeCharts(currentSymbol,selectedTime);}
+function handleXAutoRangeToggle(){isXAutoRangeEnabled=xAutoRangeToggle.checked;if(chartInitialized){const layoutUpdate={'xaxis.autorange':isXAutoRangeEnabled};if(!isXAutoRangeEnabled){const data15m=allKlinesData['15m'];if(data15m.length>0){const newRange=[createDate(data15m[Math.max(0,data15m.length-MAX_DISPLAY_CANDLES)][0]),createDate(data15m[data15m.length-1][0])];layoutUpdate['xaxis.range']=newRange;updateXAxisRangeForAllCharts(newRange);}}else{Plotly.relayout(chartContainerTop,layoutUpdate);Plotly.relayout(chartContainerBottom,layoutUpdate);}}}
+function handleYAutoRangeToggle(){isYAutoRangeEnabled=yAutoRangeToggle.checked;if(chartInitialized){const layoutUpdate={'yaxis.autorange':isYAutoRangeEnabled};Plotly.relayout(chartContainerTop,layoutUpdate);Plotly.relayout(chartContainerBottom,layoutUpdate);}}
+function handleRelayout(eventData){
+    if(isRelayouting) return;
+    if(eventData['xaxis.range[0]'] || eventData['xaxis.range']) {
+        const newRange = eventData['xaxis.range'] || [eventData['xaxis.range[0]'], eventData['xaxis.range[1]']];
+        if(!newRange || newRange.length !== 2) return;
+        
+        updateXAxisRangeForAllCharts(newRange);
+        
+        const currentRange = chartContainerTop._fullLayout.xaxis.range.map(d => new Date(d).getTime());
+        if(new Date(newRange[0]).getTime() < currentRange[0]) {
+            checkForPastDataFetch(newRange);
+        }
+        
+        updateAllActiveZones();
+    }
 }
-
-function handleKeyDown(event) {
-    if (document.activeElement.tagName === 'INPUT') return;
-    const key = event.key.toLowerCase();
-    let preventDefault = true;
-    if (key === 'c') triggerAnalysisAtCenter();
-    else if (key === '+' || key === '=') zoomTime(true);
-    else if (key === '-' || key === '_') zoomTime(false);
-    else if (key === 'arrowup' || key === 'w') panPrice(0.05);
-    else if (key === 'arrowdown' || key === 's') panPrice(-0.05);
-    else if (key === 'arrowleft' || key === 'a') panTime(-PAN_FRACTION);
-    else if (key === 'arrowright' || key === 'd') panTime(PAN_FRACTION);
-    else preventDefault = false;
-    if (preventDefault) event.preventDefault();
+function updateActiveTimeframeButton(activeTf){if(timeframeButtonsContainer){timeframeButtonsContainer.querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.dataset.timeframe===activeTf));}}
+function clearAllShapes() {
+    drawnBoxes = [];
+    currentBoxFirstPoint = null;
+    selectionBox = null;
+    selectedSeries = [];
+    isFullAnalysisDone = false;
+    handleDrawingToolToggle('none');
+    Plotly.relayout(chartContainerTop, { shapes: getHiddenCrosshairShapes(), annotations: [] });
+    Plotly.relayout(chartContainerBottom, { shapes: getHiddenCrosshairShapes(), annotations: [] });
 }
-
-function handleWheelZoom(event) {
-    if (!chartInitialized) return;
-    event.preventDefault();
-    zoomTime(event.deltaY < 0);
-}
-
-// ===================================================================================
-// 유틸리티 및 헬퍼 함수
-// ===================================================================================
-function getClickCoordinates(e) { const fullLayout = chartContainer._fullLayout; if (!fullLayout?.xaxis?._length) return null; const bRect = chartContainer.getBoundingClientRect(); const x = e.clientX - bRect.left - fullLayout.margin.l; const y = e.clientY - bRect.top - fullLayout.margin.t; if (x < 0 || x > fullLayout.xaxis._length || y < 0 || y > fullLayout.yaxis._length) return null; return { time: createDate(fullLayout.xaxis.p2d(x)), price: fullLayout.yaxis.p2d(y) }; }
-
-function getCurrentlyVisibleShapes() {
-    const analysisAndSeriesShapes = (chartContainer.layout.shapes || []).filter(s => s.name?.startsWith('analysis_') || s.name?.startsWith('series_'));
-    const userBoxes = drawnBoxes.filter(b => b.id !== selectionBox?.id);
-    const allShapes = [...userBoxes, ...analysisAndSeriesShapes];
-    if (selectionBox) { allShapes.push(selectionBox); }
-    return allShapes;
-}
-
-function zoomTime(zoomIn) { if (!chartInitialized) return; if (isXAutoRangeEnabled) { isXAutoRangeEnabled = false; xAutoRangeToggle.checked = false; } const range = chartContainer._fullLayout.xaxis.range.map(d => new Date(d).getTime()); const change = (range[1] - range[0]) * X_AXIS_ZOOM_FACTOR * (zoomIn ? 0.5 : -0.5); Plotly.relayout(chartContainer, { 'xaxis.range': [createDate(range[0] + change), createDate(range[1] - change)] }); }
-function panTime(fraction) { if (!chartInitialized) return; if (isXAutoRangeEnabled) { isXAutoRangeEnabled = false; xAutoRangeToggle.checked = false; } const range = chartContainer._fullLayout.xaxis.range.map(d => new Date(d).getTime()); const move = (range[1] - range[0]) * fraction; Plotly.relayout(chartContainer, { 'xaxis.range': [createDate(range[0] + move), createDate(range[1] + move)] }).then(() => { if (fraction < 0 && !fetchingMoreData) { const viewportStartTime = new Date(chartContainer._fullLayout.xaxis.range[0]).getTime(); if (klinesData.length > 0 && (viewportStartTime - klinesData[0][0]) <= (candleIntervalMillis || 60000) * 50) fetchMoreHistoricalData(); } else if (fraction > 0 && !fetchingFutureData) { const viewportEndTime = new Date(chartContainer._fullLayout.xaxis.range[1]).getTime(); const lastKnownTime = klinesData.length > 0 ? klinesData[klinesData.length - 1][0] : 0; if (viewportEndTime >= lastKnownTime - (candleIntervalMillis || 60000) * 10) fetchFutureData(lastKnownTime + candleIntervalMillis, lastKnownTime + (CANDLES_TO_FETCH_ON_PAN_RIGHT * candleIntervalMillis)); } }); }
-function adjustPriceScale(zoomIn) { if (!chartInitialized) return; if (isYAutoRangeEnabled) { isYAutoRangeEnabled = false; yAutoRangeToggle.checked = false; } const range = chartContainer._fullLayout.yaxis.range; const change = (range[1] - range[0]) * Y_AXIS_ZOOM_FACTOR * (zoomIn ? -0.5 : 0.5); Plotly.relayout(chartContainer, { 'yaxis.range': [range[0] - change, range[1] + change] }); }
-function panPrice(fraction) { if (!chartInitialized) return; if (isYAutoRangeEnabled) { isYAutoRangeEnabled = false; yAutoRangeToggle.checked = false; } const range = chartContainer._fullLayout.yaxis.range; const move = (range[1] - range[0]) * fraction; Plotly.relayout(chartContainer, { 'yaxis.range': [range[0] + move, range[1] + move] }); }
-
-function handleCalendarIconClick() { timeTravelPickerArea.style.display = timeTravelPickerArea.style.display === 'none' ? 'flex' : 'none'; if (timeTravelPickerArea.style.display === 'flex') datetimePicker.value = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16); }
-function handleLoadPastDataClick() { if (datetimePicker.value) fetchAndDisplayTimeTravelData(new Date(datetimePicker.value).getTime()); }
-function handleXAutoRangeToggle() { isXAutoRangeEnabled = xAutoRangeToggle.checked; if (chartInitialized) { Plotly.relayout(chartContainer, { 'xaxis.autorange': isXAutoRangeEnabled }); if (!isXAutoRangeEnabled && klinesData.length > 0) updateChartRange(klinesData, true, false); } }
-function handleYAutoRangeToggle() { isYAutoRangeEnabled = yAutoRangeToggle.checked; if (chartInitialized) { Plotly.relayout(chartContainer, { 'yaxis.autorange': isYAutoRangeEnabled }); if (!isYAutoRangeEnabled && klinesData.length > 0) updateChartRange(klinesData, false, true); } }
-function handleRelayout(eventData) { if (eventData['xaxis.range[0]'] || eventData['xaxis.range']) { if (isXAutoRangeEnabled) { isXAutoRangeEnabled = false; xAutoRangeToggle.checked = false; } } if (eventData['yaxis.range[0]'] || eventData['yaxis.range']) { if (isYAutoRangeEnabled) { isYAutoRangeEnabled = false; yAutoRangeToggle.checked = false; } } if (Object.keys(eventData).some(k => k.startsWith('shapes['))) { drawnBoxes = (chartContainer.layout.shapes || []).filter(s => s.id?.startsWith(BOX_SHAPE_NAME_PREFIX)).map(s => ({ ...s, editable: true })); } }
-function updateActiveTimeframeButton(activeTf) { timeframeButtonsContainer.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.timeframe === activeTf)); }
-
 // ===================================================================================
 // DOMContentLoaded 이벤트
 // ===================================================================================
-timeframeButtonsContainer.addEventListener('click', (event) => {
-    if (event.target.tagName === 'BUTTON' && event.target.dataset.timeframe) {
-        const newTimeframe = event.target.dataset.timeframe;
-        if (newTimeframe !== currentTimeframe) {
-            currentTimeframe = newTimeframe;
-            initializeCharts(currentSymbol, currentTimeframe);
-        }
-    }
-});
 document.addEventListener('DOMContentLoaded', () => {
-    initializeCharts(currentSymbol, currentTimeframe);
+    chartContainerTop = document.getElementById('chart-container-top');
+    chartContainerBottom = document.getElementById('chart-container-bottom');
+    xAutoRangeToggle = document.getElementById('x-autorange-toggle-top');
+    yAutoRangeToggle = document.getElementById('y-autorange-toggle-top');
+    zoomInButton = document.getElementById('zoom-in');
+    zoomOutButton = document.getElementById('zoom-out');
+    zoomPriceUpButton = document.getElementById('zoom-price-up');
+    zoomPriceDownButton = document.getElementById('zoom-price-down');
+    contextMenu = document.getElementById('chart-context-menu');
+    timeframeButtonsContainer = document.getElementById('timeframe-buttons');
+    calendarIconButton = document.getElementById('calendar-icon-button');
+    timeTravelPickerArea = document.getElementById('time-travel-picker-area');
+    datetimePicker = document.getElementById('datetime-picker');
+    loadPastDataButton = document.getElementById('load-past-data-button');
+    goLiveButton = document.getElementById('go-live-button');
+    toggleBoxDrawingButton = document.getElementById('toggle-box-drawing-button');
+    deleteBoxButton = document.getElementById('delete-box');
+
+    timeframeButtonsContainer.addEventListener('click', async (event) => {
+        if (event.target.tagName === 'BUTTON' && event.target.dataset.timeframe) {
+            const newTimeframe = event.target.dataset.timeframe;
+            if (newTimeframe !== activeAnalysisTimeframe) {
+                activeAnalysisTimeframe = newTimeframe;
+                updateTopBar();
+                updateActiveTimeframeButton(newTimeframe);
+                console.log(`Active analysis timeframe changed to: ${newTimeframe}`);
+            }
+        }
+    });
+
+    initializeCharts(currentSymbol);
 });
-    </script>
+</script>
 </body>
 </html>

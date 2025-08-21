@@ -157,8 +157,8 @@ def score_visual_first_impulse(pivots: list, EPS: float) -> tuple[dict, list]:
 if __name__ == '__main__':
     # --- 설정 변수 ---
     START_DATE_STR = '2019-12-01'
-    END_DATE_STR = '2019-12-31'
-    TIMEFRAME = "15m"
+    END_DATE_STR = '2024-12-31'
+    TIMEFRAME = "1m"
     SYMBOL = "BTCUSDT"
     
     # 타임프레임별 권장 설정

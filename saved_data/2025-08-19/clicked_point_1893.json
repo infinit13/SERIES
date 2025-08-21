@@ -1,0 +1,17 @@
+{
+    "start_ts":1624587300000,
+    "end_ts":1624626900000,
+    "retracement_score":3.26,
+    "pivot_count":4,
+    "abs_angle_deg":54.87,
+    "direction":-1,
+    "force_score":178.8762,
+    "litho_status":"SUCCESS",
+    "litho_score":1.0,
+    "parent_id":510,
+    "parent_force_score":87.5334,
+    "parent_direction":-1.0,
+    "grandparent_id":157,
+    "grandparent_force_score":102.7566,
+    "grandparent_direction":-1.0
+}
