@@ -1,5 +1,4 @@
-# UMAP_Grandparent.py
-# '부모-자식' 버전에 '조부모' 계층을 추가하고, 방향 정보 및 데이터 저장 기능을 포함한 최종 버전
+# UMAP_Grandparent.py (Final - UMAP + Live K-means Clustering)
 
 import dash
 from dash import dcc, html
@@ -12,10 +11,9 @@ import requests
 import os
 import json
 from datetime import datetime
-
-# --- 분석 라이브러리 임포트 ---
 from sklearn.preprocessing import StandardScaler
-import umap # umap-learn >= 0.5 필요
+from sklearn.cluster import KMeans # KMeans 라이브러리 추가
+import umap
 
 # ==============================================================================
 # ## 섹션 0: 공통 설정
@@ -23,6 +21,7 @@ import umap # umap-learn >= 0.5 필요
 SERVER_URL = "http://localhost:8202"
 SYMBOL = "BTCUSDT"
 TF_OPTIONS = ['5m', '15m', '1h', '4h', '1d']
+NUM_CLUSTERS = 4 # ❗️ 클러스터 개수 설정 (여기서 변경 가능) ❗️
 
 # ==============================================================================
 # ## 섹션 1: 헬퍼 함수
@@ -79,23 +78,23 @@ def load_and_enrich_data_with_grandparent(gp_path, p_path, c_path):
         # 2단계: 자식 -> 부모 -> 조부모 연결
         df_c['parent_id'] = -1
         df_c['parent_force_score'] = np.nan
-        df_c['parent_direction'] = np.nan # [추가] 부모 방향
+        df_c['parent_direction'] = np.nan
         df_c['grandparent_id'] = -1
         df_c['grandparent_force_score'] = np.nan
-        df_c['grandparent_direction'] = np.nan # [추가] 조부모 방향
+        df_c['grandparent_direction'] = np.nan
 
         for p_id, p_row in df_p.iterrows():
             mask = (df_c['start_ts'] >= p_row['start_ts']) & (df_c['end_ts'] <= p_row['end_ts'])
             df_c.loc[mask, 'parent_id'] = p_id
             df_c.loc[mask, 'parent_force_score'] = p_row['force_score']
-            df_c.loc[mask, 'parent_direction'] = p_row['direction'] # [추가] 부모 방향 연결
+            df_c.loc[mask, 'parent_direction'] = p_row['direction']
             df_c.loc[mask, 'grandparent_id'] = p_row['grandparent_id'] 
         
         # 조부모 점수 및 방향 연결
         gp_scores = df_gp['force_score']
-        gp_directions = df_gp['direction'] # [추가] 조부모 방향 데이터
+        gp_directions = df_gp['direction']
         df_c['grandparent_force_score'] = df_c['grandparent_id'].map(gp_scores)
-        df_c['grandparent_direction'] = df_c['grandparent_id'].map(gp_directions) # [추가] 조부모 방향 연결
+        df_c['grandparent_direction'] = df_c['grandparent_id'].map(gp_directions)
         
         return {
             'grandparent_data': df_gp.to_dict('index'),
@@ -107,14 +106,14 @@ def load_and_enrich_data_with_grandparent(gp_path, p_path, c_path):
         return None
 
 # ==============================================================================
-# ## 섹션 2: Dash 앱 레이아웃 (변경 없음)
+# ## 섹션 2: Dash 앱 레이아웃
 # ==============================================================================
 app = dash.Dash(__name__)
 app.title = "UMAP Analyzer (with Grandparent)"
 
 app.layout = html.Div(style={'backgroundColor': '#1E1E1E', 'color': '#E0E0E0', 'fontFamily': 'sans-serif'}, children=[
     dcc.Store(id='analysis-data-store'),
-    html.H1(children='UMAP 분석기 (조부모 계층 추가)', style={'textAlign': 'center', 'padding': '15px'}),
+    html.H1(children='UMAP 분석기 (조부모 계층 + 라이브 클러스터링)', style={'textAlign': 'center', 'padding': '15px'}),
     
     html.Div([
         html.Div([
@@ -138,7 +137,7 @@ app.layout = html.Div(style={'backgroundColor': '#1E1E1E', 'color': '#E0E0E0', '
             html.H4("1. 자식 노드 필터링", style={'marginTop': '0'}),
              html.Div([
                 html.Div([html.Label("되돌림 점수:"), dcc.Input(id='ret-score-min', type='number'), dcc.Input(id='ret-score-max', type='number')], style={'display': 'inline-block', 'padding': '5px'}),
-                html.Div([html.Label("피봇 개수:"), dcc.Input(id='pivot-min', type='number'), dcc.Input(id='pivot-max', type='number')], style={'display': 'inline-block', 'padding': '5px'}),
+                html.Div([html.Label("피봇 개수:"), dcc.Input(id='pivot-min', type='number', value=4), dcc.Input(id='pivot-max', type='number', value=10)], style={'display': 'inline-block', 'padding': '5px'}),
                 html.Div([html.Label("절대 각도:"), dcc.Input(id='slope-min', type='number'), dcc.Input(id='slope-max', type='number')], style={'display': 'inline-block', 'padding': '5px'}),
                 html.Div([html.Label("방향:"), dcc.Dropdown(id='direction-dropdown', options=[{'label': '전체', 'value': 'all'}, {'label': 'UP', 'value': 'up'}, {'label': 'DOWN', 'value': 'down'}], value='all', clearable=False)], style={'display': 'inline-block', 'width': '150px', 'padding': '5px'}),
             ]),
@@ -154,7 +153,8 @@ app.layout = html.Div(style={'backgroundColor': '#1E1E1E', 'color': '#E0E0E0', '
                 {'label': '채색: 자식 점수', 'value': 'force_score'}, 
                 {'label': '채색: 부모 점수', 'value': 'parent_force_score'},
                 {'label': '채색: 조부모 점수', 'value': 'grandparent_force_score'},
-                {'label': '채색: 방향', 'value': 'direction'}
+                {'label': '채색: 방향', 'value': 'direction'},
+                {'label': '채색: 클러스터', 'value': 'cluster'}
             ], value='force_score', clearable=False, style={'width': '250px', 'marginRight': '10px'}),
             html.Button('분석 실행', id='run-button', n_clicks=0, style={'padding': '8px 15px'}),
         ], style={'padding': '15px', 'backgroundColor': '#2a2a2a', 'borderRadius': '5px'}),
@@ -231,29 +231,22 @@ def universal_callback(run_clicks, clickData, analysis_data, rs_min, rs_max, p_m
             parent_id = clicked_child['parent_id']
             grandparent_id = clicked_child['grandparent_id']
             
-           # --- START: 클릭된 포인트 데이터 JSON으로 저장 (경로 수정 버전) ---
+           # --- START: 클릭된 포인트 데이터 JSON으로 저장 ---
             save_message = ""
             try:
-                # 스크립트 파일이 있는 디렉토리를 기준으로 경로 설정
                 script_dir = os.path.dirname(os.path.abspath(__file__))
-                # 데이터를 저장할 상위 폴더(saved_data)와 날짜 폴더 경로 생성
                 today_str = datetime.now().strftime('%Y-%m-%d')
                 save_dir = os.path.join(script_dir, 'saved_data', today_str)
                 
-                os.makedirs(save_dir, exist_ok=True) # 폴더가 없으면 생성
-                
-                # 파일명 및 전체 경로 정의
+                os.makedirs(save_dir, exist_ok=True)
                 file_name = f"clicked_point_{clicked_child_id}.json"
                 file_path = os.path.join(save_dir, file_name)
 
-                # pandas Series를 JSON으로 변환하여 파일에 저장
                 with open(file_path, 'w', encoding='utf-8') as f:
                     clicked_child.to_json(f, indent=4, force_ascii=False, default_handler=str)
                 
-                # 사용자에게 보여줄 상대 경로 생성
                 display_path = os.path.join('saved_data', today_str, file_name)
                 save_message = f"Saved to {display_path}"
-
             except Exception as e:
                 save_message = f"Save failed: {str(e)}"
                 traceback.print_exc()
@@ -300,6 +293,16 @@ def universal_callback(run_clicks, clickData, analysis_data, rs_min, rs_max, p_m
         ] if q])
         
         df_filtered = df_c.query(query_str) if query_str else df_c
+
+        # ❗️ 라이브 클러스터링 실행 ❗️
+        if len(df_filtered) >= NUM_CLUSTERS:
+            features = df_filtered[['retracement_score', 'abs_angle_deg', 'pivot_count']].values
+            scaler = StandardScaler()
+            scaled_features = scaler.fit_transform(features)
+            kmeans = KMeans(n_clusters=NUM_CLUSTERS, random_state=42, n_init='auto')
+            df_filtered.loc[:, 'cluster'] = kmeans.fit_predict(scaled_features)
+        else:
+            df_filtered.loc[:, 'cluster'] = np.nan
         
         if len(df_filtered) < 2:
             return placeholder.update_layout(title_text='데이터 부족'), placeholder, placeholder, "필터 조건에 맞는 데이터가 부족합니다."
@@ -307,7 +310,6 @@ def universal_callback(run_clicks, clickData, analysis_data, rs_min, rs_max, p_m
         features = df_filtered[['retracement_score', 'abs_angle_deg', 'pivot_count']].values
         embedding = umap.UMAP(n_neighbors=umap_neighbors, min_dist=umap_min_dist, random_state=42).fit_transform(StandardScaler().fit_transform(features))
         
-        # --- [수정] Hover Text에 방향 정보 추가 ---
         _f = lambda v: f"{v:.2f}" if pd.notna(v) else "N/A"
         _d = lambda d: 'UP' if d > 0 else ('DOWN' if d < 0 else 'N/A')
         
@@ -318,10 +320,14 @@ def universal_callback(run_clicks, clickData, analysis_data, rs_min, rs_max, p_m
             f"G-Parent: {int(r.grandparent_id)} (F: {_f(r.grandparent_force_score)}, D: {_d(r.grandparent_direction)})"
             for idx, r in df_filtered.iterrows()
         ]
-        
+
         if color_mode == 'direction':
             colors = df_filtered['direction'].map({1.0: 1, -1.0: 0})
             cbar_title, colorscale = '방향', [[0,'lightcoral'],[1,'lightgreen']]
+        elif color_mode == 'cluster':
+            colors = df_filtered['cluster'].astype(int)
+            cbar_title, colorscale = '클러스터', 'Spectral'
+            hover_texts = [f"{t}<br>Cluster: {int(c)}" for t, c in zip(hover_texts, colors)]
         else:
             colors = df_filtered[color_mode].fillna(0)
             cbar_title = {'parent_force_score': '부모 점수', 'grandparent_force_score': '조부모 점수'}.get(color_mode, '자식 점수')
